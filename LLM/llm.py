@@ -1,0 +1,22 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class LLM:
+    def __init__(self):
+        route = os.getenv("ROUTE") or ""
+        if route == "":
+            raise ValueError("ROUTE is not set in the environment variables. Acceptable values are 'LOCAL' or 'REMOTE'.")
+        
+        if route.upper() == "LOCAL":
+            from LLM.llm_local import LLM_Local
+            self.llm = LLM_Local()
+        elif route.upper() == "REMOTE":
+            from LLM.llm_remote import LLM_Remote
+            self.llm = LLM_Remote()
+        else:
+            raise ValueError("Invalid ROUTE value. Acceptable values are 'LOCAL' or 'REMOTE'.")
+
+    def generate(self, prompt: str, system_instruction: str = "You are a helpful assistant.", number_of_attempts: int = 2, temperature: float = 0.0, max_tokens: int = 16384) -> str:
+        return self.llm.generate(prompt = prompt, system_instruction = system_instruction, number_of_attempts = number_of_attempts, temperature = temperature, max_tokens = max_tokens)
