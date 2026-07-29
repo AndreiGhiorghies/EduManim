@@ -18,5 +18,21 @@ class LLM:
         else:
             raise ValueError("Invalid ROUTE value. Acceptable values are 'LOCAL' or 'REMOTE'.")
 
-    def generate(self, prompt: str, system_instruction: str = "You are a helpful assistant.", number_of_attempts: int = 2, temperature: float = 0.0, max_tokens: int = 16384) -> str:
-        return self.llm.generate(prompt = prompt, system_instruction = system_instruction, number_of_attempts = number_of_attempts, temperature = temperature, max_tokens = max_tokens)
+    def generate(self, prompt, system_instruction: str = "You are a helpful assistant.", number_of_attempts: int = 2, temperature: float = 0.0, max_tokens: int = 16384) -> str:
+        if isinstance(prompt, list):
+            extracted_prompt = ""
+            extracted_system = system_instruction
+            
+            for message in prompt:
+                if hasattr(message, 'type'):
+                    if message.type == 'system':
+                        extracted_system = message.content
+                    elif message.type in ['human', 'user']:
+                        extracted_prompt += message.content + "\n"
+            
+            prompt = extracted_prompt.strip()
+            system_instruction = extracted_system
+
+        ans = self.llm.generate(prompt = prompt, system_instruction = system_instruction, number_of_attempts = number_of_attempts, temperature = temperature, max_tokens = max_tokens)
+
+        return ans

@@ -4,13 +4,22 @@ class LLM_Local:
     def __init__(self, model_path: str = "./LLM/Models/qwen2.5-3b-instruct-q4_k_m.gguf"):
         
         """
-            n_ctx=700,       # limit context size to avoid Out of Memory
+        ./LLM/Models/qwen2.5-32b-instruct-q8_0-00001-of-00009.gguf
+
+        self.llm = Llama(
+            model_path=model_path,
+            n_gpu_layers=-1,
+            n_ctx=4096,
+            n_batch=512,
+            n_threads=8,
+            verbose=False
+        )
         """
+
         self.llm = Llama(
             model_path=model_path,
             n_batch=256,
             n_threads=2,
-            logits_all=True,
             verbose=False
         )
 

@@ -11,3 +11,10 @@ snapshot_download(
     allow_patterns=["qwen2.5-3b-instruct-q4_k_m.gguf"]
 )
 
+""" snapshot_download(
+    repo_id="Qwen/Qwen2.5-32B-Instruct-GGUF",
+    local_dir="./LLM/Models",
+    allow_patterns=["*q8_0*.gguf"]
+) """
+
+
