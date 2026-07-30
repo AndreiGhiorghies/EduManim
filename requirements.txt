@@ -1,4 +1,10 @@
 python-dotenv
 requests
-
 llama-cpp-python==0.3.33
+manim==0.19.1
+coqui-tts
+torch
+torchaudio
+torchcodec
+pydub
+soundfile
