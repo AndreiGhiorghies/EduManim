@@ -1,13 +1,18 @@
 """
-test/unit/test_validator.py
+tests/unit/test_validator.py
 
 Unit tests for tools/manim/validator.py.
 
+Covers the Day 2 deliverable: "Validator catches 5+ types of bad Manim
+code." Each `test_bad_*` below is a distinct failure mode.
 """
 
 import pytest
 
 from tools.manim.validator import validate
+
+
+# --- Good path -----------------------------------------------------------
 
 
 def test_good_scene_is_valid():
@@ -22,6 +27,10 @@ class Scene1(Scene):
     result = validate(source)
     assert result.valid
     assert result.errors == []
+
+
+# --- Bad code sample 1: syntax error --------------------------------------
+
 
 def test_bad_syntax_error():
     source = """
@@ -65,6 +74,10 @@ class Scene1(Scene):
     result = validate(source)
     assert not result.valid
     assert any("import from 'subprocess'" in e for e in result.errors)
+
+
+# --- Bad code sample 3: forbidden calls (eval/exec/os.system/subprocess) --
+
 
 def test_bad_eval_call():
     source = """
