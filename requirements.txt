@@ -10,3 +10,6 @@ faiss-cpu
 rank_bm25
 pypdf==4.0.0
 gradio
+imageio 
+imageio-ffmpeg 
+pillow

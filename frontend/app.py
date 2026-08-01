@@ -1,11 +1,52 @@
- 
+
 import inspect
+import math
+import os
 import random
+import sys
 import time
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
  
 import gradio as gr
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+ 
+# frontend/app.py needs to reach the sibling tools/rag/ package:
+#   edumanim/
+#   ├── tools/rag/...
+#   └── frontend/app.py   <- this file
+# Running `python frontend/app.py` puts frontend/ on sys.path, not the
+# project root, so tools/ wouldn't be importable without this.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+ 
+try:
+    from tools.rag.config import DEFAULT_KB_ID
+    from tools.rag.ingest import delete_document, ingest_file, list_documents, reindex_all
+    from tools.rag.retrieve import Retriever
+ 
+    RAG_AVAILABLE = True
+except ImportError as _rag_import_error:
+    RAG_AVAILABLE = False
+    DEFAULT_KB_ID = "default"
+    _RAG_IMPORT_ERROR_MSG = (
+        f"RAG module not found at {_PROJECT_ROOT / 'tools' / 'rag'} "
+        f"({_rag_import_error}). Knowledge Base features are disabled "
+        f"until tools/rag/ is present with its dependencies installed."
+    )
+ 
+MOCK_VIDEO_DIR = Path(os.environ.get("EDUMANIM_DATA_ROOT", "./data")) / "mock_videos"
+MOCK_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+ 
+# No system ffmpeg, no bundled .ttf files needed:
+#  - imageio-ffmpeg ships its own ffmpeg binary as a pip package (installed
+#    automatically as an `imageio` dependency), so there's nothing to
+#    download separately or add to PATH.
+#  - Pillow's ImageFont.load_default(size=...) is a built-in scalable font
+#    (available since Pillow 9.2+), so no external font files are needed.
  
 # Gradio's Chatbot API has shifted across versions: older releases (~4.20,
 # your team's pin) accept messages-format history without a `type=` kwarg
@@ -54,12 +95,14 @@ class MockJob:
  
  
 class MockBackend:
-    """Standalone dev backend — no network, no GPU, just realistic timing."""
+    """Standalone dev backend for job/video/transcript mocking (still no
+    Track A, no LLM, no Manim). Knowledge Base storage/retrieval is NOT
+    mocked -- it calls the real tools/rag/ module directly, see
+    handle_upload/handle_slot_delete/handle_test_query below.
+    """
  
     def __init__(self):
         self.jobs: dict[str, MockJob] = {}
-        self.kb_docs: dict[str, dict] = {}
-        self.videos: list[dict] = []
  
     def create_job(self, query: str, kb_id: str | None = None, voice: str = "Narrator (neutral)") -> MockJob:
         job = MockJob(query, kb_id, voice)
@@ -67,39 +110,211 @@ class MockBackend:
         return job
  
     def stream_progress(self, job: MockJob):
-        """Yields (status_line, thought_line, progress_fraction) tuples."""
+        """Yields (status_line, thought_line, progress_fraction) tuples.
+        The 'researching' step calls your REAL RAG retriever if a
+        knowledge base has documents in it -- everything else here
+        (planning/scripting/rendering/narrating) is still simulated since
+        it depends on the LLM + Manim + TTS, which are Track A/B's job.
+        """
         for status, label, frac in PROGRESS_STEPS:
             time.sleep(random.uniform(0.35, 0.7))
             thought = THOUGHT_LINES.get(status, "")
-            if "{q}" in thought:
-                thought = thought.format(q=job.query[:40])
-            if "{n}" in thought:
-                n = label.split(" ")[2] if "scene" in label else "1"
-                thought = thought.format(n=n)
-            if "{voice}" in thought:
-                thought = thought.format(voice=job.voice)
+            if status == "researching" and RAG_AVAILABLE:
+                thought = _real_research_thought(job)
+            else:
+                if "{q}" in thought:
+                    thought = thought.format(q=job.query[:40])
+                if "{n}" in thought:
+                    n = label.split(" ")[2] if "scene" in label else "1"
+                    thought = thought.format(n=n)
+                if "{voice}" in thought:
+                    thought = thought.format(voice=job.voice)
             yield label, thought, frac
  
-    def upload_doc(self, filename: str) -> dict:
-        doc_id = str(uuid.uuid4())[:8]
-        chunks = random.randint(8, 60)
-        entry = {
-            "doc_id": doc_id,
-            "filename": filename,
-            "chunks": chunks,
-            "uploaded_at": datetime.now().strftime("%b %d, %H:%M"),
-        }
-        self.kb_docs[doc_id] = entry
-        return entry
+    def build_scenes(self, query: str) -> list[dict]:
+        """Mock 'script' -- what Track A's Scriptwriter node would actually
+        return. Generic on purpose since this is standalone dev, not a real
+        LLM call.
+        """
+        topic = _extract_topic(query)
+        return [
+            {
+                "title": "Introduction",
+                "narration": f"Let's break down {topic}. Before the details, here's the "
+                              f"big picture of what's actually going on and why it matters.",
+            },
+            {
+                "title": "Core idea",
+                "narration": f"At the heart of {topic} is a simple mechanism, built step "
+                              f"by step from a few key pieces working together.",
+            },
+            {
+                "title": "Worked example",
+                "narration": f"Let's walk through a concrete example of {topic}, so the "
+                              f"idea isn't just abstract -- you can see exactly how it plays out.",
+            },
+            {
+                "title": "Summary",
+                "narration": f"To recap: {topic} comes down to the core idea we just "
+                              f"covered. Keep that mental model in mind next time you run into it.",
+            },
+        ]
  
-    def delete_doc(self, doc_id: str) -> None:
-        self.kb_docs.pop(doc_id, None)
+    def render_preview_video(self, job: MockJob) -> str:
+        """Synthesizes a short, REAL, playable mp4 -- pure Python (Pillow
+        draws frames, imageio-ffmpeg encodes them), no system ffmpeg
+        install or font files required. Not the real rendered Manim scenes
+        (that's Track A + B's job post-integration) -- clearly labeled as
+        a preview so it's never mistaken for the final render.
+        """
+        import imageio.v2 as imageio
  
-    def docs_newest_first(self) -> list[dict]:
-        return list(self.kb_docs.values())[::-1]
+        out_path = MOCK_VIDEO_DIR / f"{job.job_id}.mp4"
+        width, height, fps, duration = 960, 544, 30, 5
+        title = job.query[:60]
+        subtitle = f"EduManim preview  ·  voiced by {job.voice}"
+ 
+        writer = imageio.get_writer(str(out_path), fps=fps, codec="libx264", quality=6)
+        try:
+            for i in range(fps * duration):
+                frame = _render_frame(width, height, i / fps, title, subtitle)
+                writer.append_data(frame)
+        finally:
+            writer.close()
+ 
+        return str(out_path)
+ 
+ 
+_TITLE_FONT = ImageFont.load_default(size=28)
+_SUBTITLE_FONT = ImageFont.load_default(size=15)
+ 
+_BG = (11, 17, 32)       # #0B1120
+_INK = (245, 243, 237)   # #F5F3ED
+_TEAL = (20, 184, 166)   # #14B8A6
+ 
+ 
+def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: ImageDraw.ImageDraw) -> list[str]:
+    words = text.split()
+    lines, current = [], ""
+    for word in words:
+        trial = f"{current} {word}".strip()
+        if draw.textlength(trial, font=font) <= max_width:
+            current = trial
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+ 
+ 
+def _render_frame(width: int, height: int, t: float, title: str, subtitle: str) -> np.ndarray:
+    """One frame of the mock preview: dark background, a pulsing teal ring
+    (echoing the hero's animated vector diagram), title + subtitle text.
+    Pure Pillow -- no external font files, no ffmpeg CLI calls.
+    """
+    img = Image.new("RGB", (width, height), _BG)
+    draw = ImageDraw.Draw(img)
+ 
+    # Faint grid, matching the hero's background texture
+    for x in range(0, width, 34):
+        draw.line([(x, 0), (x, height)], fill=(18, 26, 46), width=1)
+    for y in range(0, height, 34):
+        draw.line([(0, y), (width, y)], fill=(18, 26, 46), width=1)
+ 
+    # Pulsing ring + orbiting dot, standing in for the real rendered scene
+    cx, cy = width // 2, int(height * 0.52)
+    r = 70 + 14 * math.sin(t * 2.2)
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=_TEAL, width=3)
+    angle = t * 1.6
+    ox, oy = cx + r * math.cos(angle), cy + r * math.sin(angle)
+    draw.ellipse([ox - 7, oy - 7, ox + 7, oy + 7], fill=_TEAL)
+ 
+    # Title (wrapped) + subtitle
+    title_lines = _wrap_text(title, _TITLE_FONT, width * 0.8, draw)
+    ty = height * 0.14
+    for line in title_lines[:2]:
+        draw.text((width / 2, ty), line, fill=_INK, font=_TITLE_FONT, anchor="mm")
+        ty += 36
+ 
+    draw.text((width / 2, height * 0.90), subtitle, fill=_TEAL, font=_SUBTITLE_FONT, anchor="mm")
+ 
+    return np.array(img)
+ 
+ 
+_LEADING_PHRASES = (
+    "explain ", "what is ", "what are ", "how does ", "how do ",
+    "why is ", "why does ", "tell me about ", "describe ",
+)
+ 
+ 
+def _extract_topic(query: str) -> str:
+    """'Explain backpropagation' -> 'backpropagation', so the generated
+    transcript reads as prose instead of echoing the raw question.
+    """
+    cleaned = query.strip().rstrip("?.! ")
+    lowered = cleaned.lower()
+    for phrase in _LEADING_PHRASES:
+        if lowered.startswith(phrase):
+            cleaned = cleaned[len(phrase):]
+            break
+    return cleaned or "this topic"
+ 
+ 
+def _fmt_timestamp(seconds: float) -> str:
+    m, s = divmod(int(seconds), 60)
+    return f"{m}:{s:02d}"
+ 
+ 
+def format_transcript(scenes: list[dict]) -> str:
+    """Scene-by-scene transcript with estimated timestamps (~140 wpm speaking
+    pace), rendered as clean HTML rather than raw text.
+    """
+    rows = []
+    t = 0.0
+    for i, scene in enumerate(scenes, start=1):
+        words = len(scene["narration"].split())
+        duration = max(6.0, words / 2.3)
+        start, end = _fmt_timestamp(t), _fmt_timestamp(t + duration)
+        rows.append(f"""
+        <div class="em-transcript-scene">
+          <div class="em-transcript-head">
+            <span class="em-transcript-title">Scene {i} — {scene['title']}</span>
+            <span class="em-transcript-time">{start}–{end}</span>
+          </div>
+          <p class="em-transcript-body">{scene['narration']}</p>
+        </div>
+        """)
+        t += duration
+    return f"<div class='em-transcript'>{''.join(rows)}</div>"
  
  
 backend = MockBackend()
+_retriever = Retriever() if RAG_AVAILABLE else None
+ 
+ 
+def _resolve_kb_id(kb_state) -> str:
+    return kb_state or DEFAULT_KB_ID
+ 
+ 
+def _real_research_thought(job: "MockJob") -> str:
+    """Called from the 'researching' progress step -- runs your actual
+    hybrid BM25+embedding+rerank retrieval and surfaces a real result
+    (or an honest 'nothing indexed' message) in the agent thoughts panel.
+    """
+    kb_id = _resolve_kb_id(job.kb_id)
+    try:
+        hits = _retriever.query(job.query, top_k=1, kb_id=kb_id)
+    except Exception as e:
+        return f"→ kb_search('{job.query[:40]}') failed: {e}"
+ 
+    if not hits:
+        return f"→ kb_search('{job.query[:40]}') → 0 results (no docs indexed in kb='{kb_id}')"
+ 
+    top = hits[0]
+    snippet = top["text"][:90].replace("\n", " ")
+    return f"→ kb_search('{job.query[:40]}') → top hit ({top['score']:.2f}) {top['source']} p.{top['page']}: \"{snippet}…\""
  
 # ============================================================================
 # THEME + CSS
@@ -270,27 +485,6 @@ h1, h2, h3, .em-display {
 }
 @keyframes em-pulse { 0%,100% { opacity: 0.35; } 50% { opacity: 1; } }
  
-/* ---------- Video result card ---------- */
-.em-video-card {
-  border: 1px solid #1C2740; border-radius: 14px; overflow: hidden;
-  background: linear-gradient(160deg, #101A30, #0B1120);
-}
-.em-video-thumb {
-  height: 190px; display: flex; align-items: center; justify-content: center;
-  background:
-    radial-gradient(circle at 30% 30%, rgba(20,184,166,0.18), transparent 60%),
-    radial-gradient(circle at 70% 70%, rgba(30,58,138,0.35), transparent 60%);
-  position: relative;
-}
-.em-play-btn {
-  width: 56px; height: 56px; border-radius: 50%;
-  background: var(--em-teal); display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 0 24px rgba(20,184,166,0.5);
-}
-.em-video-meta { padding: 14px 18px; }
-.em-video-meta .em-title { font-family: 'Space Grotesk', sans-serif; font-weight: 600; color: var(--em-ink); font-size: 15px; margin-bottom: 4px; }
-.em-video-meta .em-sub { color: var(--em-muted); font-size: 12.5px; }
- 
 /* ---------- Tabs ---------- */
 .tabs > .tab-nav { border-bottom: 1px solid #1C2740 !important; gap: 4px; }
 .tabs > .tab-nav button {
@@ -315,6 +509,22 @@ h1, h2, h3, .em-display {
 }
 .em-kb-row .em-kb-label { color: var(--em-ink) !important; font-size: 13.5px; }
 .em-kb-row .em-kb-label strong { font-family: 'Space Grotesk', sans-serif; }
+ 
+/* ---------- Transcript ---------- */
+.em-transcript { display: flex; flex-direction: column; gap: 14px; margin-top: 6px; }
+.em-transcript-scene {
+  border-left: 2px solid #1C2740; padding: 2px 0 2px 14px;
+}
+.em-transcript-head {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 4px;
+}
+.em-transcript-title {
+  font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: 13.5px; color: var(--em-teal);
+}
+.em-transcript-time {
+  font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--em-muted); flex-shrink: 0;
+}
+.em-transcript-body { color: var(--em-ink); font-size: 13.5px; line-height: 1.6; margin: 0; opacity: 0.92; }
 """
  
 # ============================================================================
@@ -324,14 +534,14 @@ h1, h2, h3, .em-display {
  
 def handle_send(message, history, kb_state, voice_state):
     if not message or not message.strip():
-        yield history, "", "", gr.update(visible=False)
+        yield history, "", "", gr.update(visible=False), gr.update(visible=False)
         return
  
     history = history + [
         {"role": "user", "content": message},
         {"role": "assistant", "content": "_starting…_"},
     ]
-    yield history, "**Starting…**", "", gr.update(visible=False)
+    yield history, "**Starting…**", "", gr.update(visible=False), gr.update(visible=False)
  
     job = backend.create_job(message, kb_id=kb_state, voice=voice_state)
     thoughts = []
@@ -342,23 +552,27 @@ def handle_send(message, history, kb_state, voice_state):
         if thought:
             thoughts.append(thought)
         history[-1]["content"] = f"_{label}…_"
-        yield history, status_md, "\n".join(thoughts), gr.update(visible=False)
+        yield history, status_md, "\n".join(thoughts), gr.update(visible=False), gr.update(visible=False)
  
-    video_card = f"""
-    <div class="em-video-card">
-      <div class="em-video-thumb">
-        <div class="em-play-btn">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="#0B1120"><path d="M8 5v14l11-7z"/></svg>
-        </div>
-      </div>
-      <div class="em-video-meta">
-        <div class="em-title">{message[:60]}</div>
-        <div class="em-sub">2:14 · 1080p · voiced by {job.voice} · rendered on our AMD Radeon GPU</div>
-      </div>
-    </div>
-    """
-    history[-1]["content"] = "Here's your explainer video 🎬"
-    yield history, "<div class='em-progress-label'>done · 100%</div>", "\n".join(thoughts), gr.update(value=video_card, visible=True)
+    scenes = backend.build_scenes(message)
+    transcript_html = format_transcript(scenes)
+ 
+    try:
+        video_path = backend.render_preview_video(job)
+        video_update = gr.update(value=video_path, visible=True)
+        reply = "Here's your explainer video 🎬"
+    except Exception as e:  # noqa: BLE001 - keep the app alive even if video synthesis fails
+        video_update = gr.update(visible=False)
+        reply = f"⚠️ Script generated, but the video preview failed to render: {e}"
+ 
+    history[-1]["content"] = reply
+    yield (
+        history,
+        "<div class='em-progress-label'>done · 100%</div>",
+        "\n".join(thoughts),
+        video_update,
+        gr.update(value=transcript_html, visible=True),
+    )
  
  
 # ============================================================================
@@ -369,16 +583,23 @@ MAX_KB_SLOTS = 15  # fixed number of list rows; hidden/shown based on doc count
                     # (avoids gr.render, which isn't available in gradio==4.20.0)
  
  
-def refresh_kb_slots():
-    """Build the full set of gr.update()s for every KB list slot + empty state.
-    Returns a flat list: [row_vis, label_md, doc_id, ...] * MAX_KB_SLOTS, then empty_state_vis.
+def refresh_kb_slots(kb_state):
+    """Build the full set of gr.update()s for every KB list slot + empty
+    state, reading from the REAL registry on disk (tools/rag/registry.py),
+    not a mock.
     """
-    docs = backend.docs_newest_first()
+    if not RAG_AVAILABLE:
+        docs = []
+    else:
+        kb_id = _resolve_kb_id(kb_state)
+        docs = list(reversed(list_documents(kb_id=kb_id)))
+ 
     updates = []
     for i in range(MAX_KB_SLOTS):
         if i < len(docs):
             d = docs[i]
-            label = f"<span class='em-kb-label'><strong>{d['filename']}</strong> — {d['chunks']} chunks · {d['uploaded_at']}</span>"
+            uploaded = d["uploaded_at"].replace("T", " ")[:16]
+            label = f"<span class='em-kb-label'><strong>{d['filename']}</strong> — {d['chunks']} chunks · {uploaded}</span>"
             updates += [gr.update(visible=True), gr.update(value=label), d["doc_id"]]
         else:
             updates += [gr.update(visible=False), gr.update(value=""), ""]
@@ -387,30 +608,63 @@ def refresh_kb_slots():
  
  
 def handle_upload(files, kb_state):
+    if not RAG_AVAILABLE:
+        return refresh_kb_slots(kb_state) + [gr.update(value=f"⚠️ {_RAG_IMPORT_ERROR_MSG}")]
     if not files:
-        return refresh_kb_slots() + [gr.update()]
+        return refresh_kb_slots(kb_state) + [gr.update()]
+ 
+    kb_id = _resolve_kb_id(kb_state)
+    ok, errors = 0, []
     for f in files:
-        name = f.name.split("/")[-1] if hasattr(f, "name") else str(f)
-        backend.upload_doc(name)
-    status = f"✓ Indexed {len(files)} file(s)"
-    return refresh_kb_slots() + [gr.update(value=status)]
+        path = f.name if hasattr(f, "name") else str(f)
+        try:
+            result = ingest_file(path, kb_id=kb_id)
+            ok += 1 if result["status"] in ("indexed", "duplicate") else 0
+        except Exception as e:  # noqa: BLE001 - surface per-file failures, keep processing the rest
+            errors.append(f"{Path(path).name}: {e}")
+ 
+    _retriever.invalidate(kb_id)  # force next query to re-read the fresh index
+ 
+    status = f"✓ Indexed {ok} file(s)"
+    if errors:
+        status += " · " + "; ".join(errors)
+    return refresh_kb_slots(kb_state) + [gr.update(value=status)]
  
  
-def handle_slot_delete(doc_id):
-    if doc_id:
-        backend.delete_doc(doc_id)
-    return refresh_kb_slots()
+def handle_slot_delete(doc_id, kb_state):
+    if RAG_AVAILABLE and doc_id:
+        kb_id = _resolve_kb_id(kb_state)
+        delete_document(doc_id, kb_id=kb_id)
+        _retriever.invalidate(kb_id)
+    return refresh_kb_slots(kb_state)
  
  
-def handle_test_query(query_text):
+def handle_test_query(query_text, kb_state):
     if not query_text or not query_text.strip():
         return "Type a question above to preview retrieval."
-    fake_hits = [
-        {"text": "…relevant passage would appear here, pulled from your uploaded docs…", "source": "example.pdf", "page": 3, "score": 0.91},
-        {"text": "…a second supporting passage, ranked lower…", "source": "example.pdf", "page": 7, "score": 0.78},
-    ]
-    lines = [f"**{h['score']:.2f}** · `{h['source']} p.{h['page']}`\n> {h['text']}" for h in fake_hits]
-    return "\n\n".join(lines)
+    if not RAG_AVAILABLE:
+        return f"⚠️ {_RAG_IMPORT_ERROR_MSG}"
+ 
+    kb_id = _resolve_kb_id(kb_state)
+    try:
+        hits = _retriever.query(query_text, top_k=5, kb_id=kb_id)
+    except Exception as e:  # noqa: BLE001 - show retrieval failures in-panel, don't crash the UI
+        return f"⚠️ Retrieval failed: {e}"
+ 
+    if not hits:
+        return "_No results — upload a document above first, or try a different question._"
+ 
+    lines = [f"**{h['score']:.2f}** · `{h['source']} p.{h['page']}`\n> {h['text']}" for h in hits]
+    return "\n\n---\n\n".join(lines)
+ 
+ 
+def handle_reindex(kb_state):
+    if not RAG_AVAILABLE:
+        return refresh_kb_slots(kb_state) + [gr.update(value=f"⚠️ {_RAG_IMPORT_ERROR_MSG}")]
+    kb_id = _resolve_kb_id(kb_state)
+    result = reindex_all(kb_id=kb_id)
+    _retriever.invalidate(kb_id)
+    return refresh_kb_slots(kb_state) + [gr.update(value=f"✓ Reindexed {result['chunk_count']} chunks")]
  
  
 # ============================================================================
@@ -430,7 +684,7 @@ def build_app() -> gr.Blocks:
             <span class="em-eyebrow">Local · Private · AMD Radeon</span>
             <h1>Ask something.<br/>Watch it get <span>explained</span>.</h1>
             <p>EduManim turns a question into a narrated, animated explainer video —
-            planned, researched, rendered, and voiced entirely on our GPU.</p>
+            planned, researched, rendered, and voiced entirely on your own GPU.</p>
           </div>
           {SIGNATURE_SVG}
         </div>
@@ -461,7 +715,9 @@ def build_app() -> gr.Blocks:
  
                     with gr.Column(scale=2):
                         progress_md = gr.HTML("<div class='em-progress-label' style='opacity:0.4'>waiting for a question…</div>")
-                        video_html = gr.HTML(visible=False)
+                        video_player = gr.Video(visible=False, show_label=False, height=220)
+                        with gr.Accordion("Transcript", open=True):
+                            transcript_html = gr.HTML("<div class='em-empty'>Transcript will appear here once a video is generated.</div>")
                         with gr.Accordion("Agent thoughts", open=False):
                             thoughts_box = gr.Textbox(
                                 value="",
@@ -472,10 +728,14 @@ def build_app() -> gr.Blocks:
                             )
  
                 send_btn.click(
-                    handle_send, [msg_box, chatbot, kb_state, voice_state], [chatbot, progress_md, thoughts_box, video_html]
+                    handle_send,
+                    [msg_box, chatbot, kb_state, voice_state],
+                    [chatbot, progress_md, thoughts_box, video_player, transcript_html],
                 ).then(lambda: "", None, msg_box)
                 msg_box.submit(
-                    handle_send, [msg_box, chatbot, kb_state, voice_state], [chatbot, progress_md, thoughts_box, video_html]
+                    handle_send,
+                    [msg_box, chatbot, kb_state, voice_state],
+                    [chatbot, progress_md, thoughts_box, video_player, transcript_html],
                 ).then(lambda: "", None, msg_box)
  
             # ========================= KNOWLEDGE BASE ========================
@@ -518,8 +778,9 @@ def build_app() -> gr.Blocks:
  
                 uploader.upload(handle_upload, [uploader, kb_state], kb_slot_outputs + [upload_status])
                 for sid, btn in zip(kb_slot_ids, kb_slot_delete_btns):
-                    btn.click(handle_slot_delete, [sid], kb_slot_outputs)
-                test_query_btn.click(handle_test_query, [test_query_box], [test_query_out])
+                    btn.click(handle_slot_delete, [sid, kb_state], kb_slot_outputs)
+                test_query_btn.click(handle_test_query, [test_query_box, kb_state], [test_query_out])
+                reindex_btn.click(handle_reindex, [kb_state], kb_slot_outputs + [upload_status])
  
             # ============================ MY VIDEOS ==========================
             with gr.Tab("🎬 My Videos"):
@@ -544,6 +805,8 @@ def build_app() -> gr.Blocks:
                         gr.Radio(["Dark (default)", "Light"], value="Dark (default)", show_label=False)
  
                 voice_radio.change(lambda v: v, [voice_radio], [voice_state])
+ 
+        demo.load(refresh_kb_slots, [kb_state], kb_slot_outputs)
  
     return demo
  
