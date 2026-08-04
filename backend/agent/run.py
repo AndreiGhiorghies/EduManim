@@ -8,11 +8,11 @@ def run_agent():
     
     app = build_graph(llm)
     
-    test_query = "Explain how a llm works"
+    test_query = "Explain what happens if an electron meets a positron."
     initial_state = create_initial_state(user_query=test_query)
     
     result = app.invoke(initial_state)
 
-    print("Script Output:", result.get("script"))
+    #print("Script Output:", result)
     
     return 0

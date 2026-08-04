@@ -1,3 +1,4 @@
+from contextlib import redirect_stdout
 import logging
 import os
 import shutil
@@ -11,7 +12,7 @@ from tools.tts.cleaner import clean_for_tts, split_sentences
 
 logger = logging.getLogger("tools.tts.synthesize")
 if not logger.handlers:
-    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(name)s: %(message)s")
+    logging.basicConfig(level=logging.WARNING, format="[%(levelname)s] %(name)s: %(message)s")
 
 SAMPLES_DIR = Path(__file__).parent / "samples"
 VOICES = {
@@ -70,6 +71,7 @@ def _write_silence(output_path: str, duration: float) -> None:
             "-t", f"{duration:.2f}", output_path,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        #result = subprocess.run(cmd, text=True, timeout=30)
         if result.returncode == 0:
             return
         logger.warning("ffmpeg silence fallback failed: %s", result.stderr.strip()[-300:])
@@ -131,12 +133,20 @@ class Synthesizer:
             logger.warning("No GPU detected; running XTTS on CPU (much slower).")
 
         self._torch = torch
-        self._tts = TTS(MODEL_NAME).to(resolved_device)
+        import os
+        from contextlib import redirect_stdout
+        with open(os.devnull, 'w') as f, redirect_stdout(f):
+            self._tts = TTS(MODEL_NAME).to(resolved_device)
 
     def _tts_to_file(self, text: str, output_path: str, speaker_wav: str, language: str) -> None:
-        self._tts.tts_to_file(
+        """ self._tts.tts_to_file(
             text=text, file_path=output_path, speaker_wav=speaker_wav, language=language,
-        )
+        ) """
+
+        with open(os.devnull, 'w') as f, redirect_stdout(f):
+            self._tts.tts_to_file(
+                text=text, file_path=output_path, speaker_wav=speaker_wav, language=language,
+            )
 
     def _synthesize_with_retry(self, text: str, output_path: str, speaker_wav: str, language: str, depth: int = 0) -> None:
         try:

@@ -27,6 +27,9 @@ class ScriptOutput(BaseModel):
     scenes: List[Scene] = Field(
         description="3-5 scenes that form the video"
     )
+    thought_process: Optional[str] = Field(
+        description="Internal reasoning of the LLM: Use this to calculate word counts, durations, and scene limits before finalizing scenes",
+    )
 
 
 # LangGraph state — TypedDict, shared between nodes
@@ -60,7 +63,7 @@ class AgentState(TypedDict):
     
     # ─── RENDERING ───────────────────────────────────────────────
     scene_videos: Dict[int, str]         # scene_id -> video file path
-    audio_tracks: Dict[int, str]         # scene_id -> audio file path
+    audio_tracks: Dict[int, Dict[str, Any]]         # scene_id -> { "path": audio file path, "duration_sec": duration }
     
     # ─── FINAL OUTPUT ────────────────────────────────────────────
     final_video_path: Optional[str]

@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -9,6 +9,20 @@ RUN apt-get update && apt-get install -y \
     cmake \
     libgomp1 \
     libstdc++6 \
+
+    pkg-config \
+    libcairo2-dev \
+    
+    libpango1.0-dev \
+    libgdk-pixbuf-2.0-dev \
+    libffi-dev \
+    shared-mime-info \
+    ffmpeg \
+
+    texlive \
+    texlive-latex-extra \
+    texlive-fonts-extra \
+    texlive-latex-recommended \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

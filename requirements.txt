@@ -1,13 +1,23 @@
 python-dotenv
 requests
+pydantic
+
 llama-cpp-python==0.3.33
-manim==0.19.1
+manim==0.20.1
 coqui-tts
-torch
-torchaudio
+
+TTS
+
+transformers==4.34.0
+
+torch==2.5.1
+torchaudio==2.5.1
+touchvision==2.5.1
 torchcodec
 pydub
 soundfile
+
+moviepy
 
 
 huggingface_hub

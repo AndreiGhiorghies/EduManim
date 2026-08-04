@@ -38,6 +38,7 @@ def _tail(text: Optional[str], n_chars: int = OUTPUT_TAIL_CHARS) -> str:
 
 
 def _find_manim_binary() -> Optional[str]:
+    return "python -m manim"
     return shutil.which("manim")
 
 
@@ -114,7 +115,7 @@ def render_scene(
         return RenderResult(success=False, error=f"Could not create media dir '{work_media_dir}': {e}")
 
     cmd = [
-        manim_bin, quality_flag, "--disable_caching",
+        "python", "-m", "manim", quality_flag, "--disable_caching",
         "--media_dir", str(work_media_dir),
         str(scene_file), scene_name,
     ]
