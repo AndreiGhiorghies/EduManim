@@ -7,3 +7,5 @@ _manim_media/
 *.pyc
 venv/
 output/
+
+frontend/data/
