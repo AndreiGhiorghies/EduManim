@@ -28,6 +28,7 @@ class ScriptOutput(BaseModel):
         description="3-5 scenes that form the video"
     )
     thought_process: Optional[str] = Field(
+        default=None,
         description="Internal reasoning of the LLM: Use this to calculate word counts, durations, and scene limits before finalizing scenes",
     )
 

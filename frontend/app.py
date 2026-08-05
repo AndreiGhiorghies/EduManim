@@ -1,4 +1,5 @@
 
+import json
 import inspect
 import math
 import os
@@ -6,12 +7,14 @@ import random
 import sys
 import time
 import uuid
+from html import escape
 from datetime import datetime, timedelta
 from pathlib import Path
  
 import gradio as gr
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+import requests
  
 # frontend/app.py needs to reach the sibling tools/rag/ package:
 #   edumanim/
@@ -32,14 +35,17 @@ try:
 except ImportError as _rag_import_error:
     RAG_AVAILABLE = False
     DEFAULT_KB_ID = "default"
+    Retriever = None
     _RAG_IMPORT_ERROR_MSG = (
         f"RAG module not found at {_PROJECT_ROOT / 'tools' / 'rag'} "
         f"({_rag_import_error}). Knowledge Base features are disabled "
         f"until tools/rag/ is present with its dependencies installed."
     )
  
-MOCK_VIDEO_DIR = Path(os.environ.get("EDUMANIM_DATA_ROOT", "./data")) / "mock_videos"
-MOCK_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+API_BASE_URL = os.environ.get("EDUMANIM_API_URL", "http://127.0.0.1:8000").rstrip("/")
+API_POLL_SECONDS = float(os.environ.get("EDUMANIM_API_POLL_SECONDS", "1.5"))
+GENERATED_VIDEO_DIR = Path(os.environ.get("EDUMANIM_DATA_ROOT", "./data")) / "generated_videos"
+GENERATED_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
  
 # No system ffmpeg, no bundled .ttf files needed:
 #  - imageio-ffmpeg ships its own ffmpeg binary as a pip package (installed
@@ -57,202 +63,67 @@ MOCK_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 _CHATBOT_ACCEPTS_TYPE = "type" in inspect.signature(gr.Chatbot.__init__).parameters
 CHATBOT_KWARGS = {"type": "messages"} if _CHATBOT_ACCEPTS_TYPE else {}
  
-# ============================================================================
-# MOCK BACKEND
-# Same shape Track A's real API will have: create_job / stream_progress /
-# list_kb_docs / upload_doc / delete_doc / list_videos. Swap the class, not
-# the calls in the UI functions below.
-# ============================================================================
- 
-PROGRESS_STEPS = [
-    ("planning", "Planning the explanation", 0.10),
-    ("researching", "Researching your knowledge base + the web", 0.28),
-    ("scripting", "Writing the narration script", 0.45),
-    ("rendering", "Rendering scene 1 of 3", 0.60),
-    ("rendering", "Rendering scene 2 of 3", 0.74),
-    ("rendering", "Rendering scene 3 of 3", 0.85),
-    ("narrating", "Generating voiceover", 0.93),
-    ("assembling", "Assembling the final video", 1.00),
-]
- 
-THOUGHT_LINES = {
-    "planning": "→ plan: [research, outline(4 scenes), render, narrate, assemble]",
-    "researching": "→ kb_search('{q}')  |  web_search('{q} explained')",
-    "scripting": "→ script.scenes = 3, target runtime ≈ 2m10s",
-    "rendering": "→ manim -qh scene_{n}.py Scene{n} --media_dir ./data/manim_workspace",
-    "narrating": "→ tts.synthesize(narration, voice='{voice}')",
-    "assembling": "→ ffmpeg: mux audio → concat scenes → final.mp4",
-}
- 
- 
-class MockJob:
-    def __init__(self, query, kb_id=None, voice="Narrator (neutral)"):
-        self.job_id = str(uuid.uuid4())[:8]
-        self.query = query
-        self.kb_id = kb_id
-        self.voice = voice
-        self.created_at = datetime.now()
- 
- 
-class MockBackend:
-    """Standalone dev backend for job/video/transcript mocking (still no
-    Track A, no LLM, no Manim). Knowledge Base storage/retrieval is NOT
-    mocked -- it calls the real tools/rag/ module directly, see
-    handle_upload/handle_slot_delete/handle_test_query below.
-    """
- 
-    def __init__(self):
-        self.jobs: dict[str, MockJob] = {}
- 
-    def create_job(self, query: str, kb_id: str | None = None, voice: str = "Narrator (neutral)") -> MockJob:
-        job = MockJob(query, kb_id, voice)
-        self.jobs[job.job_id] = job
-        return job
- 
-    def stream_progress(self, job: MockJob):
-        """Yields (status_line, thought_line, progress_fraction) tuples.
-        The 'researching' step calls your REAL RAG retriever if a
-        knowledge base has documents in it -- everything else here
-        (planning/scripting/rendering/narrating) is still simulated since
-        it depends on the LLM + Manim + TTS, which are Track A/B's job.
-        """
-        for status, label, frac in PROGRESS_STEPS:
-            time.sleep(random.uniform(0.35, 0.7))
-            thought = THOUGHT_LINES.get(status, "")
-            if status == "researching" and RAG_AVAILABLE:
-                thought = _real_research_thought(job)
-            else:
-                if "{q}" in thought:
-                    thought = thought.format(q=job.query[:40])
-                if "{n}" in thought:
-                    n = label.split(" ")[2] if "scene" in label else "1"
-                    thought = thought.format(n=n)
-                if "{voice}" in thought:
-                    thought = thought.format(voice=job.voice)
-            yield label, thought, frac
- 
-    def build_scenes(self, query: str) -> list[dict]:
-        """Mock 'script' -- what Track A's Scriptwriter node would actually
-        return. Generic on purpose since this is standalone dev, not a real
-        LLM call.
-        """
-        topic = _extract_topic(query)
-        return [
-            {
-                "title": "Introduction",
-                "narration": f"Let's break down {topic}. Before the details, here's the "
-                              f"big picture of what's actually going on and why it matters.",
+class ApiBackend:
+    def __init__(self, base_url: str = API_BASE_URL, poll_seconds: float = API_POLL_SECONDS):
+        self.base_url = base_url.rstrip("/")
+        self.poll_seconds = poll_seconds
+        self.session = requests.Session()
+
+    def create_job(self, query: str, voice: str, video_quality: str) -> dict:
+        response = self.session.post(
+            f"{self.base_url}/api/jobs",
+            json={
+                "user_query": query,
+                "voice": voice,
+                "video_quality": video_quality,
             },
-            {
-                "title": "Core idea",
-                "narration": f"At the heart of {topic} is a simple mechanism, built step "
-                              f"by step from a few key pieces working together.",
-            },
-            {
-                "title": "Worked example",
-                "narration": f"Let's walk through a concrete example of {topic}, so the "
-                              f"idea isn't just abstract -- you can see exactly how it plays out.",
-            },
-            {
-                "title": "Summary",
-                "narration": f"To recap: {topic} comes down to the core idea we just "
-                              f"covered. Keep that mental model in mind next time you run into it.",
-            },
-        ]
- 
-    def render_preview_video(self, job: MockJob) -> str:
-        """Synthesizes a short, REAL, playable mp4 -- pure Python (Pillow
-        draws frames, imageio-ffmpeg encodes them), no system ffmpeg
-        install or font files required. Not the real rendered Manim scenes
-        (that's Track A + B's job post-integration) -- clearly labeled as
-        a preview so it's never mistaken for the final render.
-        """
-        import imageio.v2 as imageio
- 
-        out_path = MOCK_VIDEO_DIR / f"{job.job_id}.mp4"
-        width, height, fps, duration = 960, 544, 30, 5
-        title = job.query[:60]
-        subtitle = f"EduManim preview  ·  voiced by {job.voice}"
- 
-        writer = imageio.get_writer(str(out_path), fps=fps, codec="libx264", quality=6)
-        try:
-            for i in range(fps * duration):
-                frame = _render_frame(width, height, i / fps, title, subtitle)
-                writer.append_data(frame)
-        finally:
-            writer.close()
- 
-        return str(out_path)
- 
- 
+            timeout=120,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def get_job(self, job_id: str) -> dict:
+        response = self.session.get(f"{self.base_url}/api/jobs/{job_id}", timeout=60)
+        response.raise_for_status()
+        return response.json()
+
+    def stream_job(self, job_id: str):
+        while True:
+            job = self.get_job(job_id)
+            yield job
+            if job.get("status") in {"completed", "failed", "cancelled"}:
+                break
+            time.sleep(self.poll_seconds)
+
+    def download_video(self, job_id: str) -> str:
+        local_path = GENERATED_VIDEO_DIR / f"{job_id}.mp4"
+        if local_path.exists():
+            return str(local_path)
+
+        with self.session.get(f"{self.base_url}/api/videos/{job_id}", stream=True, timeout=300) as response:
+            response.raise_for_status()
+            with local_path.open("wb") as file_handle:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        file_handle.write(chunk)
+        return str(local_path)
+
+    def list_videos(self) -> list[dict]:
+        response = self.session.get(f"{self.base_url}/api/videos", timeout=60)
+        response.raise_for_status()
+        return response.json()
+
+
 _TITLE_FONT = ImageFont.load_default(size=28)
 _SUBTITLE_FONT = ImageFont.load_default(size=15)
- 
-_BG = (11, 17, 32)       # #0B1120
-_INK = (245, 243, 237)   # #F5F3ED
-_TEAL = (20, 184, 166)   # #14B8A6
- 
- 
-def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: ImageDraw.ImageDraw) -> list[str]:
-    words = text.split()
-    lines, current = [], ""
-    for word in words:
-        trial = f"{current} {word}".strip()
-        if draw.textlength(trial, font=font) <= max_width:
-            current = trial
-        else:
-            if current:
-                lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-    return lines
- 
- 
-def _render_frame(width: int, height: int, t: float, title: str, subtitle: str) -> np.ndarray:
-    """One frame of the mock preview: dark background, a pulsing teal ring
-    (echoing the hero's animated vector diagram), title + subtitle text.
-    Pure Pillow -- no external font files, no ffmpeg CLI calls.
-    """
-    img = Image.new("RGB", (width, height), _BG)
-    draw = ImageDraw.Draw(img)
- 
-    # Faint grid, matching the hero's background texture
-    for x in range(0, width, 34):
-        draw.line([(x, 0), (x, height)], fill=(18, 26, 46), width=1)
-    for y in range(0, height, 34):
-        draw.line([(0, y), (width, y)], fill=(18, 26, 46), width=1)
- 
-    # Pulsing ring + orbiting dot, standing in for the real rendered scene
-    cx, cy = width // 2, int(height * 0.52)
-    r = 70 + 14 * math.sin(t * 2.2)
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=_TEAL, width=3)
-    angle = t * 1.6
-    ox, oy = cx + r * math.cos(angle), cy + r * math.sin(angle)
-    draw.ellipse([ox - 7, oy - 7, ox + 7, oy + 7], fill=_TEAL)
- 
-    # Title (wrapped) + subtitle
-    title_lines = _wrap_text(title, _TITLE_FONT, width * 0.8, draw)
-    ty = height * 0.14
-    for line in title_lines[:2]:
-        draw.text((width / 2, ty), line, fill=_INK, font=_TITLE_FONT, anchor="mm")
-        ty += 36
- 
-    draw.text((width / 2, height * 0.90), subtitle, fill=_TEAL, font=_SUBTITLE_FONT, anchor="mm")
- 
-    return np.array(img)
- 
- 
+
 _LEADING_PHRASES = (
     "explain ", "what is ", "what are ", "how does ", "how do ",
     "why is ", "why does ", "tell me about ", "describe ",
 )
- 
- 
+
+
 def _extract_topic(query: str) -> str:
-    """'Explain backpropagation' -> 'backpropagation', so the generated
-    transcript reads as prose instead of echoing the raw question.
-    """
     cleaned = query.strip().rstrip("?.! ")
     lowered = cleaned.lower()
     for phrase in _LEADING_PHRASES:
@@ -288,33 +159,89 @@ def format_transcript(scenes: list[dict]) -> str:
         """)
         t += duration
     return f"<div class='em-transcript'>{''.join(rows)}</div>"
- 
- 
-backend = MockBackend()
-_retriever = Retriever() if RAG_AVAILABLE else None
+
+
+def build_transcript_from_job(job: dict) -> str:
+    script_json = job.get("script_json")
+    if not script_json:
+        return "<div class='em-empty'>Transcript will appear here once a video is generated.</div>"
+
+    try:
+        script = json.loads(script_json)
+    except json.JSONDecodeError:
+        return "<div class='em-empty'>Transcript data was returned in an invalid format.</div>"
+
+    scenes = script.get("scenes", []) if isinstance(script, dict) else []
+    if not scenes:
+        return "<div class='em-empty'>Transcript is not available for this job.</div>"
+    return format_transcript(scenes)
+
+
+def _has_transcript(job: dict) -> bool:
+    script_json = job.get("script_json")
+    if not script_json:
+        return False
+    try:
+        script = json.loads(script_json)
+    except json.JSONDecodeError:
+        return False
+    return bool(isinstance(script, dict) and script.get("scenes"))
+
+
+def render_video_gallery(videos: list[dict]) -> str:
+    if not videos:
+        return "<div class='em-empty'>No videos yet — generate one from the Chat tab and it'll show up here.</div>"
+
+    cards = []
+    for video in videos:
+        job_id = escape(str(video.get("job_id", "")))
+        completed_at = escape(str(video.get("completed_at", "")))
+        video_url = f"{API_BASE_URL}/api/videos/{job_id}"
+        cards.append(
+            f"""
+            <div class='em-kb-row' style='display:flex; justify-content:space-between; gap:12px;'>
+              <div>
+                <div class='em-kb-label'><strong>{job_id}</strong></div>
+                <div style='color: var(--em-muted); font-size: 12px;'>Completed: {completed_at}</div>
+              </div>
+              <a href='{video_url}' target='_blank' style='color: var(--em-teal); text-decoration:none; align-self:center;'>Open</a>
+            </div>
+            """
+        )
+    return "<div class='em-transcript'>" + "".join(cards) + "</div>"
+
+
+backend = ApiBackend()
+if RAG_AVAILABLE and Retriever is not None:
+    _retriever = Retriever()
+else:
+    _retriever = None
  
  
 def _resolve_kb_id(kb_state) -> str:
     return kb_state or DEFAULT_KB_ID
  
  
-def _real_research_thought(job: "MockJob") -> str:
+def _real_research_thought(query: str, kb_id: str | None) -> str:
     """Called from the 'researching' progress step -- runs your actual
     hybrid BM25+embedding+rerank retrieval and surfaces a real result
     (or an honest 'nothing indexed' message) in the agent thoughts panel.
     """
-    kb_id = _resolve_kb_id(job.kb_id)
+    if _retriever is None:
+        return f"→ kb_search('{query[:40]}') skipped: retriever unavailable"
+
+    kb_id = _resolve_kb_id(kb_id)
     try:
-        hits = _retriever.query(job.query, top_k=1, kb_id=kb_id)
+        hits = _retriever.query(query, top_k=1, kb_id=kb_id)
     except Exception as e:
-        return f"→ kb_search('{job.query[:40]}') failed: {e}"
+        return f"→ kb_search('{query[:40]}') failed: {e}"
  
     if not hits:
-        return f"→ kb_search('{job.query[:40]}') → 0 results (no docs indexed in kb='{kb_id}')"
+        return f"→ kb_search('{query[:40]}') → 0 results (no docs indexed in kb='{kb_id}')"
  
     top = hits[0]
     snippet = top["text"][:90].replace("\n", " ")
-    return f"→ kb_search('{job.query[:40]}') → top hit ({top['score']:.2f}) {top['source']} p.{top['page']}: \"{snippet}…\""
+    return f"→ kb_search('{query[:40]}') → top hit ({top['score']:.2f}) {top['source']} p.{top['page']}: \"{snippet}…\""
  
 # ============================================================================
 # THEME + CSS
@@ -532,7 +459,7 @@ h1, h2, h3, .em-display {
 # ============================================================================
  
  
-def handle_send(message, history, kb_state, voice_state):
+def handle_send(message, history, kb_state, voice_state, quality_state):
     if not message or not message.strip():
         yield history, "", "", gr.update(visible=False), gr.update(visible=False)
         return
@@ -543,36 +470,94 @@ def handle_send(message, history, kb_state, voice_state):
     ]
     yield history, "**Starting…**", "", gr.update(visible=False), gr.update(visible=False)
  
-    job = backend.create_job(message, kb_id=kb_state, voice=voice_state)
+    try:
+        job = backend.create_job(message, voice=voice_state, video_quality=quality_state)
+    except requests.HTTPError as exc:
+        detail = exc.response.text if exc.response is not None else str(exc)
+        history[-1]["content"] = f"⚠️ Could not start generation: {detail}"
+        yield history, "<div class='em-progress-label'>failed</div>", detail, gr.update(visible=False), gr.update(visible=False)
+        return
+    except requests.RequestException as exc:
+        history[-1]["content"] = f"⚠️ Could not connect to the API: {exc}"
+        yield history, "<div class='em-progress-label'>failed</div>", str(exc), gr.update(visible=False), gr.update(visible=False)
+        return
+
     thoughts = []
- 
-    for label, thought, frac in backend.stream_progress(job):
-        pct = int(frac * 100)
-        status_md = f"<div class='em-progress-label'>{label} · {pct}%</div>"
-        if thought:
-            thoughts.append(thought)
-        history[-1]["content"] = f"_{label}…_"
-        yield history, status_md, "\n".join(thoughts), gr.update(visible=False), gr.update(visible=False)
- 
-    scenes = backend.build_scenes(message)
-    transcript_html = format_transcript(scenes)
+    transcript_html = gr.update(visible=False)
  
     try:
-        video_path = backend.render_preview_video(job)
+        for job_state in backend.stream_job(job["id"]):
+            status = job_state.get("status", "running")
+            stage = job_state.get("progress_stage") or status
+            message_text = job_state.get("progress_message") or f"Job {status}"
+            pct = int(_progress_fraction(job_state) * 100)
+            status_md = f"<div class='em-progress-label'>{escape(stage)} · {pct}%</div>"
+
+            if message_text and (not thoughts or thoughts[-1] != message_text):
+                thoughts.append(message_text)
+
+            if _has_transcript(job_state):
+                transcript_html = gr.update(value=build_transcript_from_job(job_state), visible=True)
+
+            history[-1]["content"] = f"_{message_text}_"
+            yield history, status_md, "\n".join(thoughts), gr.update(visible=False), transcript_html
+
+        final_job = backend.get_job(job["id"])
+        if final_job.get("status") != "completed":
+            error_text = final_job.get("error") or "Job did not complete successfully"
+            history[-1]["content"] = f"⚠️ {error_text}"
+            yield history, "<div class='em-progress-label'>failed · 100%</div>", "\n".join(thoughts), gr.update(visible=False), transcript_html
+            return
+
+        video_path = backend.download_video(job["id"])
+        transcript_html = gr.update(value=build_transcript_from_job(final_job), visible=True)
         video_update = gr.update(value=video_path, visible=True)
+        videos_html = render_video_gallery(backend.list_videos())
         reply = "Here's your explainer video 🎬"
-    except Exception as e:  # noqa: BLE001 - keep the app alive even if video synthesis fails
-        video_update = gr.update(visible=False)
-        reply = f"⚠️ Script generated, but the video preview failed to render: {e}"
- 
-    history[-1]["content"] = reply
-    yield (
-        history,
-        "<div class='em-progress-label'>done · 100%</div>",
-        "\n".join(thoughts),
-        video_update,
-        gr.update(value=transcript_html, visible=True),
-    )
+
+        history[-1]["content"] = reply
+        yield (
+            history,
+            "<div class='em-progress-label'>done · 100%</div>",
+            "\n".join(thoughts),
+            video_update,
+            transcript_html,
+        )
+        return
+    except Exception as exc:  # noqa: BLE001 - keep the app alive even if the API flow fails
+        history[-1]["content"] = f"⚠️ Generation failed: {exc}"
+        yield history, "<div class='em-progress-label'>failed</div>", "\n".join(thoughts), gr.update(visible=False), transcript_html
+        return
+
+
+def _progress_fraction(job_state: dict) -> float:
+    status = job_state.get("status")
+    stage = job_state.get("progress_stage") or ""
+
+    if status == "queued":
+        return 0.05
+    if status == "running":
+        if stage.startswith("rendering_"):
+            return 0.65
+        if stage == "assembling":
+            return 0.9
+        if stage == "narration":
+            return 0.45
+        if stage == "scripting":
+            return 0.2
+        return 0.1
+    if status == "completed":
+        return 1.0
+    if status in {"failed", "cancelled"}:
+        return 1.0
+    return 0.0
+
+
+def refresh_video_gallery():
+    try:
+        return render_video_gallery(backend.list_videos())
+    except Exception as exc:  # noqa: BLE001 - show backend availability issues in the UI instead of crashing
+        return f"<div class='em-empty'>Could not load videos from API: {escape(str(exc))}</div>"
  
  
 # ============================================================================
@@ -612,6 +597,9 @@ def handle_upload(files, kb_state):
         return refresh_kb_slots(kb_state) + [gr.update(value=f"⚠️ {_RAG_IMPORT_ERROR_MSG}")]
     if not files:
         return refresh_kb_slots(kb_state) + [gr.update()]
+
+    if _retriever is None:
+        return refresh_kb_slots(kb_state) + [gr.update(value="⚠️ Retriever unavailable")]
  
     kb_id = _resolve_kb_id(kb_state)
     ok, errors = 0, []
@@ -633,6 +621,8 @@ def handle_upload(files, kb_state):
  
 def handle_slot_delete(doc_id, kb_state):
     if RAG_AVAILABLE and doc_id:
+        if _retriever is None:
+            return refresh_kb_slots(kb_state)
         kb_id = _resolve_kb_id(kb_state)
         delete_document(doc_id, kb_id=kb_id)
         _retriever.invalidate(kb_id)
@@ -644,6 +634,9 @@ def handle_test_query(query_text, kb_state):
         return "Type a question above to preview retrieval."
     if not RAG_AVAILABLE:
         return f"⚠️ {_RAG_IMPORT_ERROR_MSG}"
+
+    if _retriever is None:
+        return "⚠️ Retriever unavailable"
  
     kb_id = _resolve_kb_id(kb_state)
     try:
@@ -661,6 +654,8 @@ def handle_test_query(query_text, kb_state):
 def handle_reindex(kb_state):
     if not RAG_AVAILABLE:
         return refresh_kb_slots(kb_state) + [gr.update(value=f"⚠️ {_RAG_IMPORT_ERROR_MSG}")]
+    if _retriever is None:
+        return refresh_kb_slots(kb_state) + [gr.update(value="⚠️ Retriever unavailable")]
     kb_id = _resolve_kb_id(kb_state)
     result = reindex_all(kb_id=kb_id)
     _retriever.invalidate(kb_id)
@@ -675,7 +670,8 @@ def build_app() -> gr.Blocks:
     with gr.Blocks(theme=THEME, css=CUSTOM_CSS, head=HEAD_HTML, title="EduManim") as demo:
  
         kb_state = gr.State(value=None)
-        voice_state = gr.State(value="Narrator (neutral)")
+        voice_state = gr.State(value="Narrator")
+        quality_state = gr.State(value="720p")
  
         # ---------------- Hero ----------------
         gr.HTML(f"""
@@ -727,17 +723,6 @@ def build_app() -> gr.Blocks:
                                 elem_classes=["em-terminal"],
                             )
  
-                send_btn.click(
-                    handle_send,
-                    [msg_box, chatbot, kb_state, voice_state],
-                    [chatbot, progress_md, thoughts_box, video_player, transcript_html],
-                ).then(lambda: "", None, msg_box)
-                msg_box.submit(
-                    handle_send,
-                    [msg_box, chatbot, kb_state, voice_state],
-                    [chatbot, progress_md, thoughts_box, video_player, transcript_html],
-                ).then(lambda: "", None, msg_box)
- 
             # ========================= KNOWLEDGE BASE ========================
             with gr.Tab("📚 Knowledge Base"):
                 gr.Markdown("Upload PDFs, Markdown, or text files. EduManim retrieves relevant passages before answering.")
@@ -784,7 +769,7 @@ def build_app() -> gr.Blocks:
  
             # ============================ MY VIDEOS ==========================
             with gr.Tab("🎬 My Videos"):
-                gr.HTML("<div class='em-empty'>No videos yet — generate one from the Chat tab and it'll show up here.</div>")
+                videos_html = gr.HTML(refresh_video_gallery())
  
             # ============================ SETTINGS ===========================
             with gr.Tab("⚙️ Settings"):
@@ -792,12 +777,12 @@ def build_app() -> gr.Blocks:
                     with gr.Column():
                         gr.Markdown("**Voice**")
                         voice_radio = gr.Radio(
-                            ["Narrator (neutral)", "Female", "Male"],
-                            value="Narrator (neutral)",
+                            ["Narrator", "Female", "Male"],
+                            value="Narrator",
                             show_label=False,
                         )
                         gr.Markdown("**Video quality**")
-                        gr.Radio(["720p", "1080p"], value="720p", show_label=False)
+                        quality_radio = gr.Radio(["720p", "1080p"], value="720p", show_label=False)
                     with gr.Column():
                         gr.Markdown("**Agent verbosity**")
                         gr.Radio(["Quiet", "Normal", "Show agent thoughts"], value="Normal", show_label=False)
@@ -805,12 +790,26 @@ def build_app() -> gr.Blocks:
                         gr.Radio(["Dark (default)", "Light"], value="Dark (default)", show_label=False)
  
                 voice_radio.change(lambda v: v, [voice_radio], [voice_state])
+                quality_radio.change(lambda v: v, [quality_radio], [quality_state])
  
-        demo.load(refresh_kb_slots, [kb_state], kb_slot_outputs)
+            send_btn.click(
+                handle_send,
+                [msg_box, chatbot, kb_state, voice_state, quality_state],
+                [chatbot, progress_md, thoughts_box, video_player, transcript_html],
+            ).then(refresh_video_gallery, None, [videos_html]).then(lambda: "", None, msg_box)
+
+            msg_box.submit(
+                handle_send,
+                [msg_box, chatbot, kb_state, voice_state, quality_state],
+                [chatbot, progress_md, thoughts_box, video_player, transcript_html],
+            ).then(refresh_video_gallery, None, [videos_html]).then(lambda: "", None, msg_box)
+
+            demo.load(refresh_kb_slots, [kb_state], kb_slot_outputs)
+            demo.load(refresh_video_gallery, None, [videos_html])
  
     return demo
  
  
 if __name__ == "__main__":
     app = build_app()
-    app.queue().launch()
+    app.queue().launch(server_name="0.0.0.0", server_port=7860)

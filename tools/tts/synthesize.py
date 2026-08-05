@@ -70,8 +70,8 @@ def _write_silence(output_path: str, duration: float) -> None:
             "ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=24000:cl=mono",
             "-t", f"{duration:.2f}", output_path,
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        #result = subprocess.run(cmd, text=True, timeout=30)
+        #result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, text=True, timeout=30)
         if result.returncode == 0:
             return
         logger.warning("ffmpeg silence fallback failed: %s", result.stderr.strip()[-300:])
@@ -99,7 +99,8 @@ def _concat_audio(parts: List[str], output_path: str) -> None:
             list_path = list_file.name
         try:
             cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", output_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            #result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(cmd, text=True, timeout=60)
             if result.returncode == 0:
                 return
             logger.warning("ffmpeg concat failed, falling back to raw wave join: %s", result.stderr.strip()[-300:])
@@ -123,6 +124,20 @@ class Synthesizer:
         try:
             import torch  # type: ignore[import-not-found]
             from TTS.api import TTS  # type: ignore[import-not-found]
+            
+            # --- PATCH GLOBAL PENTRU PYTORCH 2.6+ ---
+            # Salvăm funcția originală torch.load
+            _original_load = torch.load
+            
+            # Definim o funcție intermediară care forțează mereu weights_only=False
+            def _patched_load(*args, **kwargs):
+                kwargs['weights_only'] = False
+                return _original_load(*args, **kwargs)
+                
+            # Suprascriem funcția în modulul torch
+            torch.load = _patched_load
+            # ----------------------------------------
+            
         except ImportError as exc:
             raise SynthesisError(
                 "The 'TTS' package (Coqui XTTS v2) is not installed. Run `pip install TTS`."
@@ -132,11 +147,16 @@ class Synthesizer:
         if resolved_device == "cpu":
             logger.warning("No GPU detected; running XTTS on CPU (much slower).")
 
+        print("Initializing Synthesizer with model:", MODEL_NAME, "on device:", resolved_device, flush=True)
         self._torch = torch
+
+        print("Torch imported", flush=True)
         import os
         from contextlib import redirect_stdout
-        with open(os.devnull, 'w') as f, redirect_stdout(f):
-            self._tts = TTS(MODEL_NAME).to(resolved_device)
+        #with open(os.devnull, 'w') as f, redirect_stdout(f):
+        self._tts = TTS(MODEL_NAME).to(resolved_device)
+
+        print("Synthesizer initialized with model:", MODEL_NAME, "on device:", resolved_device, flush=True)
 
     def _tts_to_file(self, text: str, output_path: str, speaker_wav: str, language: str) -> None:
         """ self._tts.tts_to_file(

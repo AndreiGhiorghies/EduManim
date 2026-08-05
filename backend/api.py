@@ -11,20 +11,15 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-DB_PATH = Path("./data/edumanim.db")
-MOCK_VIDEO_PATH = Path("./data/mock/final.mp4")
-JOB_STATUSES = {"queued", "running", "completed", "failed", "cancelled"}
+from backend.agent.graph import build_graph
+from LLM.llm import LLM
+from backend.agent.nodes.manim_coder import process_all_scenes
+from backend.agent.state import create_initial_state
 
-MOCK_STAGES = [
-    ("planning", "Planning video structure..."),
-    ("scripting", "Writing narration script..."),
-    ("rendering_1", "Rendering scene 1/3..."),
-    ("rendering_2", "Rendering scene 2/3..."),
-    ("rendering_3", "Rendering scene 3/3..."),
-    ("narration", "Synthesizing narration audio..."),
-    ("assembling", "Assembling final video..."),
-]
-MOCK_STAGE_DELAY_SECONDS = 1.5
+DB_PATH = Path("./data/edumanim.db")
+JOB_STATUSES = {"queued", "running", "completed", "failed", "cancelled"}
+generation_lock = asyncio.Lock()
+active_generation_job_id: Optional[str] = None
 
 
 def get_db():
@@ -52,6 +47,17 @@ def init_db():
         )
         """
     )
+    existing_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+    }
+    for column_name, column_type in (
+        ("script_json", "TEXT"),
+        ("progress_stage", "TEXT"),
+        ("progress_message", "TEXT"),
+    ):
+        if column_name not in existing_columns:
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {column_name} {column_type}")
     conn.commit()
     conn.close()
 
@@ -77,6 +83,7 @@ class JobPubSub:
 
 pubsub = JobPubSub()
 running_tasks: dict[str, asyncio.Task] = {}
+app_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 def now() -> str:
@@ -99,55 +106,195 @@ def get_job(job_id: str) -> Optional[sqlite3.Row]:
     return row
 
 
-async def run_mock_pipeline(job_id: str, user_query: str):
-    """
-    Simulates the agent -> manim -> tts -> ffmpeg pipeline.
-    Replace this function body with a real call into the LangGraph
-    orchestrator once it's ready; the job lifecycle and event shape
-    below are what the frontend already expects, so nothing else
-    needs to change.
-    """
+async def publish_job_event(job_id: str, event: dict):
+    await pubsub.publish(job_id, event)
+
+
+def publish_job_event_sync(job_id: str, event: dict):
+    if app_loop is None:
+        asyncio.run(publish_job_event(job_id, event))
+        return
+
+    future = asyncio.run_coroutine_threadsafe(publish_job_event(job_id, event), app_loop)
+    future.result()
+
+
+async def release_generation_slot(job_id: str):
+    async with generation_lock:
+        global active_generation_job_id
+        if active_generation_job_id == job_id:
+            active_generation_job_id = None
+
+
+def run_agent_pipeline_sync(job_id: str, user_query: str, voice: str, video_quality: str, conversation_id: Optional[str]):
     try:
-        update_job(job_id, status="running")
-        await pubsub.publish(job_id, {"type": "status", "status": "running"})
+        update_job(job_id, status="running", error=None)
+        publish_job_event_sync(job_id, {"type": "status", "status": "running"})
 
-        for stage_id, message in MOCK_STAGES:
-            await asyncio.sleep(MOCK_STAGE_DELAY_SECONDS)
-            await pubsub.publish(
-                job_id,
-                {"type": "progress", "stage": stage_id, "message": message},
-            )
-
-        final_video_path = str(MOCK_VIDEO_PATH)
-        update_job(
-            job_id,
-            status="completed",
-            final_video_path=final_video_path,
-            completed_at=now(),
+        llm = LLM()
+        graph = build_graph(llm, voice=voice, video_quality=video_quality)
+        state = create_initial_state(
+            user_query=user_query,
+            conversation_id=conversation_id,
         )
-        await pubsub.publish(
+
+        publish_job_event_sync(
             job_id,
             {
-                "type": "status",
-                "status": "completed",
-                "final_video_path": final_video_path,
+                "type": "progress",
+                "stage": "scripting",
+                "message": "Writing narration script...",
             },
         )
+
+        update_job(
+            job_id,
+            progress_stage="scripting",
+            progress_message="Writing narration script...",
+        )
+
+        state = graph.scriptwriter_node(state)
+
+        script_data = state.get("script")
+        if script_data is not None:
+            update_job(
+                job_id,
+                script_json=json.dumps(script_data, ensure_ascii=False),
+            )
+
+        update_job(
+            job_id,
+            script_json=json.dumps(script_data, ensure_ascii=False),
+            progress_stage="narration",
+            progress_message="Synthesizing narration audio...",
+        )
+        publish_job_event_sync(
+            job_id,
+            {
+                "type": "progress",
+                "stage": "narration",
+                "message": "Synthesizing narration audio...",
+            },
+        )
+
+        print("Starting TTS synthesis...")
+        state = asyncio.run(graph.tts(state))
+        print("TTS synthesis completed.")
+
+        print(state)
+
+        total_scenes = max(len(state.get("scenes", [])), 1)
+
+        def progress_callback(event_type: str, payload: dict):
+            if event_type == "manim_scene_done":
+                scene_id = payload.get("scene_id", 0)
+                progress = payload.get("progress", 0)
+                message = f"Rendering scene {scene_id}/{total_scenes}..."
+                update_job(
+                    job_id,
+                    progress_stage=f"rendering_{scene_id}",
+                    progress_message=message,
+                )
+                publish_job_event_sync(
+                    job_id,
+                    {
+                        "type": "progress",
+                        "stage": f"rendering_{scene_id}",
+                        "scene_id": scene_id,
+                        "message": message,
+                        "progress": progress,
+                    },
+                )
+
+        state = asyncio.run(process_all_scenes(
+            state,
+            llm=graph.llm,
+            output_dir="output",
+            max_retries=2,
+            progress_callback=progress_callback,
+        ))
+
+        publish_job_event_sync(
+            job_id,
+            {
+                "type": "progress",
+                "stage": "assembling",
+                "message": "Assembling final video...",
+            },
+        )
+        update_job(
+            job_id,
+            progress_stage="assembling",
+            progress_message="Assembling final video...",
+        )
+        state = graph.assembler(state)
+
+        final_video_path = state.get("final_video_path")
+        if final_video_path:
+            final_video_path = str(Path(final_video_path).expanduser().resolve())
+            update_job(
+                job_id,
+                status="completed",
+                final_video_path=final_video_path,
+                error=None,
+                progress_stage="completed",
+                progress_message="Video generation completed",
+                completed_at=now(),
+            )
+            publish_job_event_sync(
+                job_id,
+                {
+                    "type": "status",
+                    "status": "completed",
+                    "final_video_path": final_video_path,
+                },
+            )
+        else:
+            error_message = "; ".join(state.get("errors", [])) or "Agent pipeline completed without a final video"
+            update_job(
+                job_id,
+                status="failed",
+                error=error_message,
+                progress_stage="failed",
+                progress_message=error_message,
+                completed_at=now(),
+            )
+            publish_job_event_sync(
+                job_id,
+                {"type": "status", "status": "failed", "error": error_message},
+            )
     except asyncio.CancelledError:
-        update_job(job_id, status="cancelled", completed_at=now())
-        await pubsub.publish(job_id, {"type": "status", "status": "cancelled"})
+        update_job(
+            job_id,
+            status="cancelled",
+            progress_stage="cancelled",
+            progress_message="Job cancelled",
+            completed_at=now(),
+        )
+        publish_job_event_sync(job_id, {"type": "status", "status": "cancelled"})
         raise
     except Exception as exc:
-        update_job(job_id, status="failed", error=str(exc), completed_at=now())
-        await pubsub.publish(
-            job_id, {"type": "status", "status": "failed", "error": str(exc)}
+        update_job(
+            job_id,
+            status="failed",
+            error=str(exc),
+            progress_stage="failed",
+            progress_message=str(exc),
+            completed_at=now(),
         )
+        publish_job_event_sync(job_id, {"type": "status", "status": "failed", "error": str(exc)})
     finally:
+        if app_loop is None:
+            asyncio.run(release_generation_slot(job_id))
+        else:
+            asyncio.run_coroutine_threadsafe(release_generation_slot(job_id), app_loop).result()
         running_tasks.pop(job_id, None)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global app_loop
+    app_loop = asyncio.get_running_loop()
     init_db()
     yield
 
@@ -157,6 +304,8 @@ app = FastAPI(title="EduManim API", lifespan=lifespan)
 
 class CreateJobRequest(BaseModel):
     user_query: str
+    voice: str
+    video_quality: str
     conversation_id: Optional[str] = None
 
 
@@ -165,6 +314,9 @@ class JobResponse(BaseModel):
     conversation_id: Optional[str]
     user_query: str
     status: str
+    script_json: Optional[str]
+    progress_stage: Optional[str]
+    progress_message: Optional[str]
     final_video_path: Optional[str]
     error: Optional[str]
     created_at: str
@@ -177,6 +329,9 @@ def row_to_response(row: sqlite3.Row) -> JobResponse:
         conversation_id=row["conversation_id"],
         user_query=row["user_query"],
         status=row["status"],
+        script_json=row["script_json"],
+        progress_stage=row["progress_stage"],
+        progress_message=row["progress_message"],
         final_video_path=row["final_video_path"],
         error=row["error"],
         created_at=row["created_at"],
@@ -186,22 +341,46 @@ def row_to_response(row: sqlite3.Row) -> JobResponse:
 
 @app.post("/api/jobs", response_model=JobResponse)
 async def create_job(payload: CreateJobRequest):
-    job_id = str(uuid.uuid4())
-    conn = get_db()
-    conn.execute(
-        """
-        INSERT INTO jobs (id, conversation_id, user_query, status, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (job_id, payload.conversation_id, payload.user_query, "queued", now()),
-    )
-    conn.commit()
-    conn.close()
+    global active_generation_job_id
 
-    task = asyncio.create_task(run_mock_pipeline(job_id, payload.user_query))
+    async with generation_lock:
+        if active_generation_job_id is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Another video generation is already running",
+            )
+
+        job_id = str(uuid.uuid4())
+        conn = get_db()
+        conn.execute(
+            """
+            INSERT INTO jobs (id, conversation_id, user_query, status, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (job_id, payload.conversation_id, payload.user_query, "queued", now()),
+        )
+        conn.commit()
+        conn.close()
+
+        row = get_job(job_id)
+        if row is None:
+            raise HTTPException(status_code=500, detail="Job could not be created")
+
+        active_generation_job_id = job_id
+
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            run_agent_pipeline_sync,
+            job_id,
+            payload.user_query,
+            payload.voice,
+            payload.video_quality,
+            payload.conversation_id,
+        )
+    )
     running_tasks[job_id] = task
 
-    return row_to_response(get_job(job_id))
+    return row_to_response(row)
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
@@ -226,19 +405,22 @@ async def cancel_job(job_id: str):
     else:
         update_job(job_id, status="cancelled", completed_at=now())
 
-    return row_to_response(get_job(job_id))
+    updated_row = get_job(job_id)
+    if updated_row is None:
+        raise HTTPException(status_code=500, detail="Job disappeared during cancellation")
+    return row_to_response(updated_row)
 
 
 @app.websocket("/api/ws/jobs/{job_id}")
 async def job_progress_ws(websocket: WebSocket, job_id: str):
-    if get_job(job_id) is None:
+    row = get_job(job_id)
+    if row is None:
         await websocket.close(code=4404)
         return
 
     await websocket.accept()
     queue = pubsub.subscribe(job_id)
     try:
-        row = get_job(job_id)
         await websocket.send_text(
             json.dumps({"type": "status", "status": row["status"]})
         )

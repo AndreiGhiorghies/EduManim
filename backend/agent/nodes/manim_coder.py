@@ -12,7 +12,7 @@ from moviepy import VideoFileClip
 
 # PROMPTS
 
-MANIM_CODER_SYSTEM_PROMPT = """You are an expert in Manim Community v0.20. Generate strictly clean, working Python code for ONE scene.
+MANIM_CODER_SYSTEM_PROMPT = """You are an expert in Manim Community v0.19. Generate strictly clean, working Python code for ONE scene.
 
 # REQUIREMENTS
 
@@ -353,18 +353,18 @@ async def process_all_scenes(
     
     for i in range(total):
         print(f"Processing scene {i + 1}/{total}...")
+
         state = manim_coder(state)
         
         scene_id = state["scenes"][i].get("id", i + 1)
         video = state["scene_videos"].get(scene_id)
-        
+
         if progress_callback:
             await progress_callback("manim_scene_done", {
                 "scene_id": scene_id,
                 "video_path": video,
                 "progress": (i + 1) / total,
             })
-
         print(f"Scene {i + 1}/{total} done. Video: {video}\n\n")
     
     return state

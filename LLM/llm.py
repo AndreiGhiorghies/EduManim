@@ -33,10 +33,10 @@ class LLM:
             prompt = extracted_prompt.strip()
             system_instruction = extracted_system
 
-        #print("Made LLM call with prompt:", prompt, "\n\n")
+        print("Made LLM call with prompt:", prompt, "\n\n")
 
         ans = self.llm.generate(prompt = prompt, system_instruction = system_instruction, number_of_attempts = number_of_attempts, temperature = temperature, max_tokens = max_tokens)
 
-        #print("LLM call returned:", ans, "\n\n")
+        print("LLM call returned:", ans, "\n\n")
 
         return ans

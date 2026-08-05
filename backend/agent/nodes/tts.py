@@ -1,93 +1,47 @@
-import json
 import asyncio
-import subprocess
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any, Dict
 
 from backend.agent.state import AgentState
+from tools.tts.synthesize import Synthesizer, SynthesisError, _wav_duration
 
 
 # HELPERS
 
 def _synthesize_sync(
+    synthesizer: Synthesizer,
     text: str,
     output_path: str,
     voice: str = "narrator",
     language: str = "en",
-    timeout: int = 1800,
 ) -> Dict[str, Any]:
     """
-    Synchronous call for Track B's TTS CLI.
-    
+    Synchronous TTS synthesis using a cached Synthesizer instance.
+
     Returns:
         {"success": bool, "audio_path": str, "duration_sec": float, "error": str|None}
     """
 
     try:
-        result = subprocess.run(
-            [
-                "python", "-m", "tools.tts.cli", "synthesize",
-                text,
-                "--output", output_path,
-                "--voice", voice,
-                "--language", language,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        
-        if result.returncode != 0:
-            # Try to parse JSON error output
-            try:
-                err_data = json.loads(result.stdout)
-                return {
-                    "success": False,
-                    "audio_path": None,
-                    "duration_sec": 0,
-                    "error": err_data.get("error", result.stderr[:200]),
-                }
-            except json.JSONDecodeError:
-                return {
-                    "success": False,
-                    "audio_path": None,
-                    "duration_sec": 0,
-                    "error": result.stderr[:200] or result.stdout[:200],
-                }
-        
-        # Succes — parse JSON output
-        try:
-            data = json.loads(result.stdout)
-            return {
-                "success": True,
-                "audio_path": data.get("audio_path"),
-                "duration_sec": data.get("duration_sec", 0),
-                "error": None,
-            }
-        except json.JSONDecodeError:
-            # Fallback: verify if output_path exists
-            if Path(output_path).is_file():
-                return {
-                    "success": True,
-                    "audio_path": output_path,
-                    "duration_sec": 0,
-                    "error": None,
-                }
-            return {
-                "success": False,
-                "audio_path": None,
-                "duration_sec": 0,
-                "error": "Invalid TTS output",
-            }
-    
-    except subprocess.TimeoutExpired:
+        print("Calling TTS engine with text:", text, "\n\n", "Voice: ", voice, flush=True)
+        audio_path = synthesizer.synthesize(text, output_path, voice=voice, language=language)
+        print("TTS engine returned:", audio_path, "\n\n", flush=True)
+        return {
+            "success": True,
+            "audio_path": audio_path,
+            "duration_sec": _wav_duration(audio_path),
+            "error": None,
+        }
+    except SynthesisError as exc:
+        print(f"TTS synthesis error: {exc}\n\n", flush=True)
         return {
             "success": False,
             "audio_path": None,
             "duration_sec": 0,
-            "error": f"TTS timeout ({timeout}s)",
+            "error": str(exc),
         }
     except Exception as e:
+        print(f"TTS engine exception: {type(e).__name__}: {str(e)}\n\n", flush=True)
         return {
             "success": False,
             "audio_path": None,
@@ -126,10 +80,16 @@ def make_tts_node(
         
         if not scenes:
             return state
+
+        print(f"Starting TTS synthesis for {len(scenes)} scenes with voice '{voice}' and language '{language}'...\n\n", flush=True)
                 
         # Setup output dir
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
+
+        print("Initializing TTS engine once for all scenes...\n\n", flush=True)
+        synthesizer = await asyncio.to_thread(Synthesizer)
+        print("TTS engine initialized.\n\n", flush=True)
         
         # Prepare async tasks for each scene
         async def synthesize_scene(scene: dict) -> tuple[int, dict]:
@@ -146,18 +106,20 @@ def make_tts_node(
                 }
             
             audio_file = str(output_path / f"narration_{scene_id}.wav")
+
+            print(f"Synthesizing TTS for scene {scene_id} ('{scene_title}') to '{audio_file}'...\n\n", flush=True)
             
             # Call Track B in a thread pool (does not block event loop)
             result = await asyncio.to_thread(
                 _synthesize_sync,
+                synthesizer,
                 narration,
                 audio_file,
                 voice,
                 language,
-                timeout_per_scene,
             )
 
-            print(scene_id, scene_title, result, "\n\n")
+            print(scene_id, scene_title, result, "\n\n", flush=True)
             
             return scene_id, result
         

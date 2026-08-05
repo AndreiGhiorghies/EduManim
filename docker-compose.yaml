@@ -4,3 +4,5 @@ services:
   edu-manim:
     build: .
     image: edu-manim:latest
+    ports:
+      - "7860:7860"

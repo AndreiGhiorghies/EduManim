@@ -6,9 +6,9 @@ from backend.agent.state import create_initial_state
 def run_agent():
     llm = LLM()
     
-    app = build_graph(llm)
+    app = build_graph(llm, 'narrator', '720p')
     
-    test_query = "Explain what happens if an electron meets a positron."
+    test_query = "Explain how a llm works."
     initial_state = create_initial_state(user_query=test_query)
     
     result = app.invoke(initial_state)
