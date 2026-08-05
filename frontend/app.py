@@ -1,4 +1,3 @@
-
 import json
 import inspect
 import math
@@ -10,12 +9,12 @@ import uuid
 from html import escape
 from datetime import datetime, timedelta
 from pathlib import Path
- 
+
 import gradio as gr
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import requests
- 
+
 # frontend/app.py needs to reach the sibling tools/rag/ package:
 #   edumanim/
 #   ├── tools/rag/...
@@ -25,12 +24,12 @@ import requests
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
- 
+
 try:
     from tools.rag.config import DEFAULT_KB_ID
     from tools.rag.ingest import delete_document, ingest_file, list_documents, reindex_all
     from tools.rag.retrieve import Retriever
- 
+
     RAG_AVAILABLE = True
 except ImportError as _rag_import_error:
     RAG_AVAILABLE = False
@@ -38,22 +37,21 @@ except ImportError as _rag_import_error:
     Retriever = None
     _RAG_IMPORT_ERROR_MSG = (
         f"RAG module not found at {_PROJECT_ROOT / 'tools' / 'rag'} "
-        f"({_rag_import_error}). Knowledge Base features are disabled "
         f"until tools/rag/ is present with its dependencies installed."
     )
- 
+
 API_BASE_URL = os.environ.get("EDUMANIM_API_URL", "http://127.0.0.1:8000").rstrip("/")
 API_POLL_SECONDS = float(os.environ.get("EDUMANIM_API_POLL_SECONDS", "1.5"))
 GENERATED_VIDEO_DIR = Path(os.environ.get("EDUMANIM_DATA_ROOT", "./data")) / "generated_videos"
 GENERATED_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
- 
+
 # No system ffmpeg, no bundled .ttf files needed:
 #  - imageio-ffmpeg ships its own ffmpeg binary as a pip package (installed
 #    automatically as an `imageio` dependency), so there's nothing to
 #    download separately or add to PATH.
 #  - Pillow's ImageFont.load_default(size=...) is a built-in scalable font
 #    (available since Pillow 9.2+), so no external font files are needed.
- 
+
 # Gradio's Chatbot API has shifted across versions: older releases (~4.20,
 # your team's pin) accept messages-format history without a `type=` kwarg
 # at all; mid-generation releases (~4.28-5.x) require `type="messages"`
@@ -62,7 +60,7 @@ GENERATED_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 # This keeps the app working across all of them instead of hardcoding one.
 _CHATBOT_ACCEPTS_TYPE = "type" in inspect.signature(gr.Chatbot.__init__).parameters
 CHATBOT_KWARGS = {"type": "messages"} if _CHATBOT_ACCEPTS_TYPE else {}
- 
+
 class ApiBackend:
     def __init__(self, base_url: str = API_BASE_URL, poll_seconds: float = API_POLL_SECONDS):
         self.base_url = base_url.rstrip("/")
@@ -131,13 +129,13 @@ def _extract_topic(query: str) -> str:
             cleaned = cleaned[len(phrase):]
             break
     return cleaned or "this topic"
- 
- 
+
+
 def _fmt_timestamp(seconds: float) -> str:
     m, s = divmod(int(seconds), 60)
     return f"{m}:{s:02d}"
- 
- 
+
+
 def format_transcript(scenes: list[dict]) -> str:
     """Scene-by-scene transcript with estimated timestamps (~140 wpm speaking
     pace), rendered as clean HTML rather than raw text.
@@ -216,12 +214,12 @@ if RAG_AVAILABLE and Retriever is not None:
     _retriever = Retriever()
 else:
     _retriever = None
- 
- 
+
+
 def _resolve_kb_id(kb_state) -> str:
     return kb_state or DEFAULT_KB_ID
- 
- 
+
+
 def _real_research_thought(query: str, kb_id: str | None) -> str:
     """Called from the 'researching' progress step -- runs your actual
     hybrid BM25+embedding+rerank retrieval and surfaces a real result
@@ -235,18 +233,18 @@ def _real_research_thought(query: str, kb_id: str | None) -> str:
         hits = _retriever.query(query, top_k=1, kb_id=kb_id)
     except Exception as e:
         return f"→ kb_search('{query[:40]}') failed: {e}"
- 
+
     if not hits:
         return f"→ kb_search('{query[:40]}') → 0 results (no docs indexed in kb='{kb_id}')"
- 
+
     top = hits[0]
     snippet = top["text"][:90].replace("\n", " ")
     return f"→ kb_search('{query[:40]}') → top hit ({top['score']:.2f}) {top['source']} p.{top['page']}: \"{snippet}…\""
- 
+
 # ============================================================================
 # THEME + CSS
 # ============================================================================
- 
+
 THEME = gr.themes.Base(
     primary_hue=gr.themes.colors.blue,
     secondary_hue=gr.themes.colors.teal,
@@ -272,12 +270,12 @@ THEME = gr.themes.Base(
     input_background_fill="#0F1729",
     input_border_color="#22304F",
 )
- 
+
 HEAD_HTML = """
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 """
- 
+
 # The signature element: a coordinate axis + orbiting vector that draws and
 # erases itself in a loop. This is the "hero as thesis" moment — it previews
 # the exact visual language (Manim-style vector geometry) before any video
@@ -295,7 +293,7 @@ SIGNATURE_SVG = """
   </svg>
 </div>
 """
- 
+
 CUSTOM_CSS = """
 :root {
   --em-void: #0B1120;
@@ -305,7 +303,7 @@ CUSTOM_CSS = """
   --em-teal: #14B8A6;
   --em-muted: #8B96AC;
 }
- 
+
 .gradio-container {
   background: var(--em-void) !important;
   max-width: 1180px !important;
@@ -313,12 +311,12 @@ CUSTOM_CSS = """
   width: 100% !important;
 }
 footer { display: none !important; }
- 
+
 h1, h2, h3, .em-display {
   font-family: 'Space Grotesk', sans-serif !important;
   letter-spacing: -0.01em;
 }
- 
+
 /* ---------- Hero ---------- */
 .em-hero {
   position: relative;
@@ -357,7 +355,7 @@ h1, h2, h3, .em-display {
 }
 .em-hero h1 span { color: var(--em-teal); }
 .em-hero p { color: var(--em-muted); font-size: 15.5px; line-height: 1.6; margin: 0; }
- 
+
 /* ---------- Signature animated diagram ---------- */
 .em-sig-wrap { position: relative; z-index: 1; flex-shrink: 0; width: 220px; height: 220px; }
 .em-sig-svg { width: 100%; height: 100%; overflow: visible; }
@@ -374,7 +372,7 @@ h1, h2, h3, .em-display {
 .em-vector-tip { fill: var(--em-teal); opacity: 0; animation: em-tip 3.6s ease-in-out infinite; }
 .em-origin { fill: var(--em-muted); }
 .em-label { fill: var(--em-teal); font-family: 'JetBrains Mono', monospace; font-size: 15px; opacity: 0; animation: em-tip 3.6s ease-in-out infinite; }
- 
+
 @keyframes em-draw {
   0%   { stroke-dashoffset: 130; opacity: 0; }
   12%  { opacity: 1; }
@@ -388,7 +386,7 @@ h1, h2, h3, .em-display {
   45%, 70% { opacity: 1; }
   90%, 100% { opacity: 0; }
 }
- 
+
 /* ---------- Agent thoughts terminal ---------- */
 .em-terminal {
   font-family: 'JetBrains Mono', monospace !important;
@@ -399,7 +397,7 @@ h1, h2, h3, .em-display {
   color: #7DD9CB !important;
   line-height: 1.7 !important;
 }
- 
+
 /* ---------- Progress line ---------- */
 .em-progress-label {
   font-family: 'JetBrains Mono', monospace; font-size: 13px;
@@ -411,7 +409,7 @@ h1, h2, h3, .em-display {
   box-shadow: 0 0 8px rgba(20,184,166,0.9);
 }
 @keyframes em-pulse { 0%,100% { opacity: 0.35; } 50% { opacity: 1; } }
- 
+
 /* ---------- Tabs ---------- */
 .tabs > .tab-nav { border-bottom: 1px solid #1C2740 !important; gap: 4px; }
 .tabs > .tab-nav button {
@@ -421,13 +419,13 @@ h1, h2, h3, .em-display {
 .tabs > .tab-nav button.selected {
   color: var(--em-teal) !important; border-bottom: 2px solid var(--em-teal) !important;
 }
- 
+
 /* ---------- Empty states ---------- */
 .em-empty {
   text-align: center; padding: 48px 20px; color: var(--em-muted);
   border: 1px dashed #22304F; border-radius: 14px; font-size: 14px;
 }
- 
+
 /* ---------- KB document list ---------- */
 .em-kb-row {
   border: 1px solid #1C2740 !important; border-radius: 10px !important;
@@ -436,7 +434,7 @@ h1, h2, h3, .em-display {
 }
 .em-kb-row .em-kb-label { color: var(--em-ink) !important; font-size: 13.5px; }
 .em-kb-row .em-kb-label strong { font-family: 'Space Grotesk', sans-serif; }
- 
+
 /* ---------- Transcript ---------- */
 .em-transcript { display: flex; flex-direction: column; gap: 14px; margin-top: 6px; }
 .em-transcript-scene {
@@ -453,23 +451,23 @@ h1, h2, h3, .em-display {
 }
 .em-transcript-body { color: var(--em-ink); font-size: 13.5px; line-height: 1.6; margin: 0; opacity: 0.92; }
 """
- 
+
 # ============================================================================
 # CHAT TAB LOGIC
 # ============================================================================
- 
- 
+
+
 def handle_send(message, history, kb_state, voice_state, quality_state):
     if not message or not message.strip():
         yield history, "", "", gr.update(visible=False), gr.update(visible=False)
         return
- 
+
     history = history + [
         {"role": "user", "content": message},
         {"role": "assistant", "content": "_starting…_"},
     ]
     yield history, "**Starting…**", "", gr.update(visible=False), gr.update(visible=False)
- 
+
     try:
         job = backend.create_job(message, voice=voice_state, video_quality=quality_state)
     except requests.HTTPError as exc:
@@ -484,7 +482,7 @@ def handle_send(message, history, kb_state, voice_state, quality_state):
 
     thoughts = []
     transcript_html = gr.update(visible=False)
- 
+
     try:
         for job_state in backend.stream_job(job["id"]):
             status = job_state.get("status", "running")
@@ -558,121 +556,169 @@ def refresh_video_gallery():
         return render_video_gallery(backend.list_videos())
     except Exception as exc:  # noqa: BLE001 - show backend availability issues in the UI instead of crashing
         return f"<div class='em-empty'>Could not load videos from API: {escape(str(exc))}</div>"
- 
- 
+
+
 # ============================================================================
 # KNOWLEDGE BASE TAB LOGIC
+#
+# NOTE ON ASSUMPTIONS: tools/rag/ingest.py and tools/rag/retrieve.py were not
+# included in what you shared, so the exact call signatures below
+# (ingest_file(path, kb_id=...), list_documents(kb_id=...),
+# delete_document(doc_id, kb_id=...), reindex_all(kb_id=...), and the shape
+# of documents/hits returned) are inferred from how they're already used
+# elsewhere in this file (_real_research_thought). Please check them against
+# the real definitions in tools/rag/ before you rely on this end-to-end --
+# if a signature differs, you'll get a clear error message in the UI instead
+# of a silent failure, but it won't work until the call matches.
 # ============================================================================
- 
-MAX_KB_SLOTS = 15  # fixed number of list rows; hidden/shown based on doc count
-                    # (avoids gr.render, which isn't available in gradio==4.20.0)
- 
- 
+
+MAX_KB_SLOTS = 20
+
+
+def _format_doc_label(doc: dict) -> str:
+    name = escape(str(doc.get("filename", doc.get("id", "document"))))
+    chunk_count = doc.get("chunk_count", doc.get("chunks", "?"))
+    added_at = escape(str(doc.get("added_at", doc.get("created_at", ""))))
+    return (
+        f"<div class='em-kb-label'><strong>{name}</strong><br>"
+        f"<span style='color: var(--em-muted); font-size: 12px;'>{chunk_count} chunks · {added_at}</span></div>"
+    )
+
+
+def _empty_kb_slots(message: str):
+    """Shared fallback: hide every slot row and show a single message in the empty state."""
+    outputs = []
+    for _ in range(MAX_KB_SLOTS):
+        outputs += [gr.update(visible=False), gr.update(value=""), ""]
+    outputs.append(gr.update(visible=True, value=f"<div class='em-empty'>{escape(message)}</div>"))
+    return outputs
+
+
 def refresh_kb_slots(kb_state):
-    """Build the full set of gr.update()s for every KB list slot + empty
-    state, reading from the REAL registry on disk (tools/rag/registry.py),
-    not a mock.
-    """
     if not RAG_AVAILABLE:
-        docs = []
-    else:
-        kb_id = _resolve_kb_id(kb_state)
-        docs = list(reversed(list_documents(kb_id=kb_id)))
- 
-    updates = []
-    for i in range(MAX_KB_SLOTS):
-        if i < len(docs):
-            d = docs[i]
-            uploaded = d["uploaded_at"].replace("T", " ")[:16]
-            label = f"<span class='em-kb-label'><strong>{d['filename']}</strong> — {d['chunks']} chunks · {uploaded}</span>"
-            updates += [gr.update(visible=True), gr.update(value=label), d["doc_id"]]
-        else:
-            updates += [gr.update(visible=False), gr.update(value=""), ""]
-    updates.append(gr.update(visible=(len(docs) == 0)))
-    return updates
- 
- 
-def handle_upload(files, kb_state):
-    if not RAG_AVAILABLE:
-        return refresh_kb_slots(kb_state) + [gr.update(value=f"⚠️ {_RAG_IMPORT_ERROR_MSG}")]
-    if not files:
-        return refresh_kb_slots(kb_state) + [gr.update()]
+        return _empty_kb_slots(_RAG_IMPORT_ERROR_MSG)
 
-    if _retriever is None:
-        return refresh_kb_slots(kb_state) + [gr.update(value="⚠️ Retriever unavailable")]
- 
-    kb_id = _resolve_kb_id(kb_state)
-    ok, errors = 0, []
-    for f in files:
-        path = f.name if hasattr(f, "name") else str(f)
-        try:
-            result = ingest_file(path, kb_id=kb_id)
-            ok += 1 if result["status"] in ("indexed", "duplicate") else 0
-        except Exception as e:  # noqa: BLE001 - surface per-file failures, keep processing the rest
-            errors.append(f"{Path(path).name}: {e}")
- 
-    _retriever.invalidate(kb_id)  # force next query to re-read the fresh index
- 
-    status = f"✓ Indexed {ok} file(s)"
-    if errors:
-        status += " · " + "; ".join(errors)
-    return refresh_kb_slots(kb_state) + [gr.update(value=status)]
- 
- 
-def handle_slot_delete(doc_id, kb_state):
-    if RAG_AVAILABLE and doc_id:
-        if _retriever is None:
-            return refresh_kb_slots(kb_state)
-        kb_id = _resolve_kb_id(kb_state)
-        delete_document(doc_id, kb_id=kb_id)
-        _retriever.invalidate(kb_id)
-    return refresh_kb_slots(kb_state)
- 
- 
-def handle_test_query(query_text, kb_state):
-    if not query_text or not query_text.strip():
-        return "Type a question above to preview retrieval."
-    if not RAG_AVAILABLE:
-        return f"⚠️ {_RAG_IMPORT_ERROR_MSG}"
-
-    if _retriever is None:
-        return "⚠️ Retriever unavailable"
- 
     kb_id = _resolve_kb_id(kb_state)
     try:
-        hits = _retriever.query(query_text, top_k=5, kb_id=kb_id)
-    except Exception as e:  # noqa: BLE001 - show retrieval failures in-panel, don't crash the UI
-        return f"⚠️ Retrieval failed: {e}"
- 
-    if not hits:
-        return "_No results — upload a document above first, or try a different question._"
- 
-    lines = [f"**{h['score']:.2f}** · `{h['source']} p.{h['page']}`\n> {h['text']}" for h in hits]
-    return "\n\n---\n\n".join(lines)
- 
- 
+        documents = list_documents(kb_id=kb_id) or []
+    except Exception as exc:
+        return _empty_kb_slots(f"Could not load documents: {exc}")
+
+    documents = documents[:MAX_KB_SLOTS]
+    outputs = []
+    for i in range(MAX_KB_SLOTS):
+        if i < len(documents):
+            doc = documents[i]
+            doc_id = str(doc.get("id", ""))
+            outputs += [gr.update(visible=True), gr.update(value=_format_doc_label(doc)), doc_id]
+        else:
+            outputs += [gr.update(visible=False), gr.update(value=""), ""]
+
+    if documents:
+        outputs.append(gr.update(visible=False, value=""))
+    else:
+        outputs.append(
+            gr.update(
+                visible=True,
+                value="<div class='em-empty'>No documents yet — upload a file above to get started.</div>",
+            )
+        )
+    return outputs
+
+
+def handle_upload(files, kb_state):
+    if not RAG_AVAILABLE:
+        return _empty_kb_slots(_RAG_IMPORT_ERROR_MSG) + [f"⚠️ {_RAG_IMPORT_ERROR_MSG}"]
+
+    if not files:
+        return refresh_kb_slots(kb_state) + [""]
+
+    kb_id = _resolve_kb_id(kb_state)
+    errors = []
+    ingested = 0
+    for file_obj in files:
+        file_path = getattr(file_obj, "name", None) or str(file_obj)
+        try:
+            ingest_file(file_path, kb_id=kb_id)
+            ingested += 1
+        except Exception as exc:
+            errors.append(f"{Path(file_path).name}: {exc}")
+
+    if errors and ingested:
+        status = f"⚠️ Ingested {ingested}/{len(files)} file(s). Failed: " + "; ".join(errors)
+    elif errors:
+        status = "⚠️ Upload failed: " + "; ".join(errors)
+    else:
+        status = f"✅ Ingested {ingested} file(s)."
+
+    return refresh_kb_slots(kb_state) + [status]
+
+
+def handle_slot_delete(doc_id, kb_state):
+    if RAG_AVAILABLE and doc_id:
+        kb_id = _resolve_kb_id(kb_state)
+        try:
+            delete_document(doc_id, kb_id=kb_id)
+        except Exception:
+            # Refresh below reflects whatever the true current state is,
+            # whether or not the delete actually succeeded.
+            pass
+    return refresh_kb_slots(kb_state)
+
+
 def handle_reindex(kb_state):
     if not RAG_AVAILABLE:
-        return refresh_kb_slots(kb_state) + [gr.update(value=f"⚠️ {_RAG_IMPORT_ERROR_MSG}")]
-    if _retriever is None:
-        return refresh_kb_slots(kb_state) + [gr.update(value="⚠️ Retriever unavailable")]
+        return _empty_kb_slots(_RAG_IMPORT_ERROR_MSG) + [f"⚠️ {_RAG_IMPORT_ERROR_MSG}"]
+
     kb_id = _resolve_kb_id(kb_state)
-    result = reindex_all(kb_id=kb_id)
-    _retriever.invalidate(kb_id)
-    return refresh_kb_slots(kb_state) + [gr.update(value=f"✓ Reindexed {result['chunk_count']} chunks")]
- 
- 
+    try:
+        reindex_all(kb_id=kb_id)
+        status = "✅ Reindexed all documents."
+    except Exception as exc:
+        status = f"⚠️ Reindex failed: {exc}"
+
+    return refresh_kb_slots(kb_state) + [status]
+
+
+def handle_test_query(query, kb_state):
+    if not query or not query.strip():
+        return ""
+
+    if not RAG_AVAILABLE:
+        return f"⚠️ {_RAG_IMPORT_ERROR_MSG}"
+    if _retriever is None:
+        return "⚠️ Retriever unavailable."
+
+    kb_id = _resolve_kb_id(kb_state)
+    try:
+        hits = _retriever.query(query, top_k=5, kb_id=kb_id)
+    except Exception as exc:
+        return f"⚠️ Retrieval failed: {exc}"
+
+    if not hits:
+        return f"_No results found in kb='{escape(kb_id)}'._"
+
+    lines = []
+    for i, hit in enumerate(hits, start=1):
+        snippet = escape(str(hit.get("text", ""))[:220].replace("\n", " "))
+        source = escape(str(hit.get("source", "unknown")))
+        page = hit.get("page", "?")
+        score = hit.get("score", 0.0)
+        lines.append(f"**{i}. {source}** (p.{page}, score {score:.2f})\n\n> {snippet}…")
+    return "\n\n".join(lines)
+
+
 # ============================================================================
 # BUILD APP
 # ============================================================================
- 
+
 def build_app() -> gr.Blocks:
     with gr.Blocks(theme=THEME, css=CUSTOM_CSS, head=HEAD_HTML, title="EduManim") as demo:
- 
+
         kb_state = gr.State(value=None)
         voice_state = gr.State(value="Narrator")
         quality_state = gr.State(value="720p")
- 
+
         # ---------------- Hero ----------------
         gr.HTML(f"""
         <div class="em-hero">
@@ -685,9 +731,9 @@ def build_app() -> gr.Blocks:
           {SIGNATURE_SVG}
         </div>
         """)
- 
+
         with gr.Tabs():
- 
+
             # ============================= CHAT =============================
             with gr.Tab("💬 Chat"):
                 with gr.Row():
@@ -699,7 +745,7 @@ def build_app() -> gr.Blocks:
                             avatar_images=(None, None),
                             **CHATBOT_KWARGS,
                         )
- 
+
                         with gr.Row():
                             msg_box = gr.Textbox(
                                 placeholder="Explain self-attention…",
@@ -708,7 +754,7 @@ def build_app() -> gr.Blocks:
                                 container=False,
                             )
                             send_btn = gr.Button("Send", variant="primary", scale=1)
- 
+
                     with gr.Column(scale=2):
                         progress_md = gr.HTML("<div class='em-progress-label' style='opacity:0.4'>waiting for a question…</div>")
                         video_player = gr.Video(visible=False, show_label=False, height=220)
@@ -722,7 +768,7 @@ def build_app() -> gr.Blocks:
                                 interactive=False,
                                 elem_classes=["em-terminal"],
                             )
- 
+
             # ========================= KNOWLEDGE BASE ========================
             with gr.Tab("📚 Knowledge Base"):
                 gr.Markdown("Upload PDFs, Markdown, or text files. EduManim retrieves relevant passages before answering.")
@@ -731,14 +777,14 @@ def build_app() -> gr.Blocks:
                     with gr.Column(scale=1):
                         upload_status = gr.Markdown("")
                         reindex_btn = gr.Button("Reindex all", variant="secondary")
- 
+
                 gr.Markdown("**Indexed documents**")
- 
+
                 kb_empty_state = gr.HTML(
                     "<div class='em-empty'>No documents yet — upload a file above to get started.</div>",
                     visible=True,
                 )
- 
+
                 kb_slot_rows, kb_slot_labels, kb_slot_ids, kb_slot_delete_btns = [], [], [], []
                 for _ in range(MAX_KB_SLOTS):
                     with gr.Row(visible=False, elem_classes=["em-kb-row"]) as slot_row:
@@ -749,28 +795,28 @@ def build_app() -> gr.Blocks:
                     kb_slot_labels.append(slot_label)
                     kb_slot_ids.append(slot_id)
                     kb_slot_delete_btns.append(slot_delete)
- 
+
                 kb_slot_outputs = []
                 for row, label, sid in zip(kb_slot_rows, kb_slot_labels, kb_slot_ids):
                     kb_slot_outputs += [row, label, sid]
                 kb_slot_outputs.append(kb_empty_state)
- 
+
                 gr.Markdown("**Test retrieval** — preview what the agent would see, before asking a full question.")
                 with gr.Row():
                     test_query_box = gr.Textbox(placeholder="e.g. What is bonded labour?", show_label=False, scale=3)
                     test_query_btn = gr.Button("Preview", scale=1)
                 test_query_out = gr.Markdown("")
- 
+
                 uploader.upload(handle_upload, [uploader, kb_state], kb_slot_outputs + [upload_status])
                 for sid, btn in zip(kb_slot_ids, kb_slot_delete_btns):
                     btn.click(handle_slot_delete, [sid, kb_state], kb_slot_outputs)
                 test_query_btn.click(handle_test_query, [test_query_box, kb_state], [test_query_out])
                 reindex_btn.click(handle_reindex, [kb_state], kb_slot_outputs + [upload_status])
- 
+
             # ============================ MY VIDEOS ==========================
             with gr.Tab("🎬 My Videos"):
                 videos_html = gr.HTML(refresh_video_gallery())
- 
+
             # ============================ SETTINGS ===========================
             with gr.Tab("⚙️ Settings"):
                 with gr.Row():
@@ -783,15 +829,10 @@ def build_app() -> gr.Blocks:
                         )
                         gr.Markdown("**Video quality**")
                         quality_radio = gr.Radio(["720p", "1080p"], value="720p", show_label=False)
-                    with gr.Column():
-                        gr.Markdown("**Agent verbosity**")
-                        gr.Radio(["Quiet", "Normal", "Show agent thoughts"], value="Normal", show_label=False)
-                        gr.Markdown("**Theme**")
-                        gr.Radio(["Dark (default)", "Light"], value="Dark (default)", show_label=False)
- 
+
                 voice_radio.change(lambda v: v, [voice_radio], [voice_state])
                 quality_radio.change(lambda v: v, [quality_radio], [quality_state])
- 
+
             send_btn.click(
                 handle_send,
                 [msg_box, chatbot, kb_state, voice_state, quality_state],
@@ -806,10 +847,10 @@ def build_app() -> gr.Blocks:
 
             demo.load(refresh_kb_slots, [kb_state], kb_slot_outputs)
             demo.load(refresh_video_gallery, None, [videos_html])
- 
+
     return demo
- 
- 
+
+
 if __name__ == "__main__":
     app = build_app()
     app.queue().launch(server_name="0.0.0.0", server_port=7860)
