@@ -73,10 +73,10 @@ def _validate_manim_code_impl(code: str, expected_scene_id: Optional[int]) -> Va
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if not alias.name.startswith("manim"):
+                if not alias.name.startswith("manim") and not alias.name.startswith("numpy"):
                     errors.append(f"Non-manim import: {alias.name}")
         elif isinstance(node, ast.ImportFrom):
-            if node.module is None or not node.module.startswith("manim"):
+            if node.module is None or not node.module.startswith("manim") and not node.module.startswith("numpy"):
                 errors.append(f"Non-manim import: {node.module}")
 
     # 4 & 5. Find Scene subclass(es) and check naming.
