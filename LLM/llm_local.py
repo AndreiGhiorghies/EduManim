@@ -1,16 +1,14 @@
 from llama_cpp import Llama
 
 class LLM_Local:
-    def __init__(self, model_path: str = "./LLM/Models/qwen2.5-3b-instruct-q4_k_m.gguf"):
+    def __init__(self, model_path: str = "./LLM/Models/qwen2.5-32b-instruct-q8_0-00001-of-00009.gguf"):
         
-        """
-            n_ctx=700,       # limit context size to avoid Out of Memory
-        """
         self.llm = Llama(
             model_path=model_path,
+            n_gpu_layers=-1,
+            n_ctx=8192,
             n_batch=256,
-            n_threads=2,
-            logits_all=True,
+            n_threads=4,
             verbose=False
         )
 

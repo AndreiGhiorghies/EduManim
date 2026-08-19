@@ -24,7 +24,7 @@ class LLM_Remote:
         }
 
         data = {
-            "model": "Qwen3.6-35B-A3B",
+            "model": "accounts/fireworks/models/minimax-m3",
             "messages": [
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": prompt}

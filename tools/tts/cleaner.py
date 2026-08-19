@@ -55,7 +55,7 @@ _WHITESPACE_RE = re.compile(r"\s+")
 def _build_symbol_pattern(words: dict) -> re.Pattern:
     keys_by_length = sorted(words, key=len, reverse=True)
     alternation = "|".join(re.escape(k) for k in keys_by_length)
-    return re.compile(r"\\(" + alternation + r")\b")
+    return re.compile(r"\\(" + alternation + r")(?![a-zA-Z])")
 
 
 _GREEK_RE = _build_symbol_pattern(GREEK_LETTERS)

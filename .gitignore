@@ -3,3 +3,15 @@
 */__pycache__/
 */Models/
 .venv
+.env
+.vscode/
+**/__pycache__/
+*/Models/
+.venv/
+_manim_media/
+*.pyc
+venv/
+output/
+
+frontend/data/
+data/
