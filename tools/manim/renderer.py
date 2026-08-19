@@ -36,11 +36,6 @@ class RenderResult:
 def _tail(text: Optional[str], n_chars: int = OUTPUT_TAIL_CHARS) -> str:
     return (text or "")[-n_chars:]
 
-
-def _find_manim_binary() -> Optional[str]:
-    return shutil.which("manim")
-
-
 def _locate_rendered_video(media_dir: Path, scene_file_stem: str, scene_name: str) -> Optional[Path]:
     """
     manim's output layout is: media_dir/videos/<scene_file_stem>/<quality>/<scene_name>.mp4
@@ -102,10 +97,6 @@ def render_scene(
         if not validation.ok:
             return RenderResult(success=False, error=f"Validation failed: {validation.as_message()}")
 
-    manim_bin = _find_manim_binary()
-    if not manim_bin:
-        return RenderResult(success=False, error="'manim' executable not found on PATH")
-
     quality_flag = QUALITY_FLAGS.get(quality, QUALITY_FLAGS["high"])
     work_media_dir = Path(media_dir) if media_dir else scene_file.parent / "_manim_media"
     try:
@@ -114,7 +105,7 @@ def render_scene(
         return RenderResult(success=False, error=f"Could not create media dir '{work_media_dir}': {e}")
 
     cmd = [
-        manim_bin, quality_flag, "--disable_caching",
+        "python3", "-m", "manim", quality_flag, "--disable_caching",
         "--media_dir", str(work_media_dir),
         str(scene_file), scene_name,
     ]
