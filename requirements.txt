@@ -4,15 +4,13 @@ pydantic
 fastapi
 numpy
 pytest
+uvicorn
 
 huggingface-hub==0.34.1
 
-llama-cpp-python==0.3.33
 manim==0.20.1
 coqui-tts
 
-torch==2.5.1
-torchaudio==2.5.1
 moviepy
 
 langchain==1.3.14

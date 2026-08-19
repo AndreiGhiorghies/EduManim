@@ -125,18 +125,13 @@ class Synthesizer:
             import torch  # type: ignore[import-not-found]
             from TTS.api import TTS  # type: ignore[import-not-found]
             
-            # --- PATCH GLOBAL PENTRU PYTORCH 2.6+ ---
-            # Salvăm funcția originală torch.load
             _original_load = torch.load
             
-            # Definim o funcție intermediară care forțează mereu weights_only=False
             def _patched_load(*args, **kwargs):
                 kwargs['weights_only'] = False
                 return _original_load(*args, **kwargs)
                 
-            # Suprascriem funcția în modulul torch
             torch.load = _patched_load
-            # ----------------------------------------
             
         except ImportError as exc:
             raise SynthesisError(
@@ -151,18 +146,12 @@ class Synthesizer:
         self._torch = torch
 
         print("Torch imported", flush=True)
-        import os
-        from contextlib import redirect_stdout
-        #with open(os.devnull, 'w') as f, redirect_stdout(f):
+
         self._tts = TTS(MODEL_NAME).to(resolved_device)
 
         print("Synthesizer initialized with model:", MODEL_NAME, "on device:", resolved_device, flush=True)
 
     def _tts_to_file(self, text: str, output_path: str, speaker_wav: str, language: str) -> None:
-        """ self._tts.tts_to_file(
-            text=text, file_path=output_path, speaker_wav=speaker_wav, language=language,
-        ) """
-
         with open(os.devnull, 'w') as f, redirect_stdout(f):
             self._tts.tts_to_file(
                 text=text, file_path=output_path, speaker_wav=speaker_wav, language=language,

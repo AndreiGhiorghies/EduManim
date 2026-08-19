@@ -3,10 +3,8 @@ from backend.agent.graph import build_graph
 from backend.agent.state import create_initial_state
 
 
-def run_agent():
-    llm = LLM()
-    
-    app = build_graph(llm, 'narrator', '720p')
+def run_agent():    
+    app = build_graph('narrator', '720p')
     
     test_query = "Explain how a llm works."
     initial_state = create_initial_state(user_query=test_query)

@@ -1,14 +1,14 @@
 import json
 import subprocess
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Dict, Any, List
+from datetime import datetime
+from uuid import uuid4
 
 from backend.agent.state import AgentState
 
 
-# HELPERS
-
-def _assemble_sync(
+def _assemble(
     scene_videos: List[str],
     audio_tracks: List[str],
     output_path: str,
@@ -20,7 +20,7 @@ def _assemble_sync(
 
     try:
         cmd = [
-            "python", "-m", "tools.ffmpeg.cli", "assemble",
+            "python3", "-m", "tools.ffmpeg.cli", "assemble",
             "--scenes", *scene_videos,
             "--audios", *audio_tracks,
             "--output", output_path,
@@ -89,23 +89,6 @@ def _assemble_sync(
             "error": f"{type(e).__name__}: {str(e)}",
         }
 
-
-def _get_video_info_sync(video_path: str, timeout: int = 10) -> Optional[Dict[str, Any]]:
-    # Obtain video info (duration, dimensions, fps)
-    try:
-        result = subprocess.run(
-            ["python", "-m", "tools.ffmpeg.cli", "info", video_path],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        if result.returncode == 0:
-            return json.loads(result.stdout)
-    except Exception as e:
-        print(f"Error getting video info for {video_path}: {e}")
-    return None
-
-
 def _validate_inputs(
     scene_videos: Dict[int, str],
     audio_tracks: Dict[int, str],
@@ -141,10 +124,13 @@ def _validate_inputs(
     return len(errors) == 0, errors
 
 
-# MAIN NODE
+def _build_unique_final_video_path() -> str:
+	stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+	short_id = uuid4().hex[:8]
+	return f"./output/final/final_{stamp}_{short_id}.mp4"
+
 
 def make_ffmpeg_node(
-    output_path: str = "/tmp/edumanim/final.mp4",
     quality: str = "720p",
     timeout: int = 300,
 ):
@@ -152,8 +138,7 @@ def make_ffmpeg_node(
     def ffmpeg_node(state: AgentState) -> AgentState:
         scene_videos = state.get("scene_videos", {})
         audio_tracks_dict = state.get("audio_tracks", {})
-        audio_tracks = {sid: audio_tracks_dict[sid]["path"] for sid in sorted(audio_tracks_dict.keys())}
-        scenes = state.get("scenes", [])
+        audio_tracks = {sorted_id: audio_tracks_dict[sorted_id]["path"] for sorted_id in sorted(audio_tracks_dict.keys())}
                 
         # Validate inputs
         is_valid, errors = _validate_inputs(scene_videos, audio_tracks)
@@ -163,26 +148,18 @@ def make_ffmpeg_node(
         
         # Order videos and audios by scene_id
         sorted_scene_ids = sorted(scene_videos.keys())
-        ordered_videos = [scene_videos[sid] for sid in sorted_scene_ids]
-        ordered_audios = [audio_tracks[sid] for sid in sorted_scene_ids]
-        
+        ordered_videos = [scene_videos[sorted_it] for sorted_it in sorted_scene_ids]
+        ordered_audios = [audio_tracks[sorted_it] for sorted_it in sorted_scene_ids]
+
+        output_path = _build_unique_final_video_path()
         
         # Setup output
         output_dir = Path(output_path).parent
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # ASSEMBLE
-        import asyncio
-        import time
-        
-        start = time.time()
-        
-        result = asyncio.run(_assemble_async(
-            ordered_videos, ordered_audios, output_path, quality, timeout
-        ))
-        
-        elapsed = time.time() - start
-        
+        # Assemble the final video
+        result = _assemble(ordered_videos, ordered_audios, output_path, quality, timeout)
+                
         # Processing result
         if result["success"]:
             state["final_video_path"] = result["video_path"]
@@ -195,17 +172,3 @@ def make_ffmpeg_node(
         return state
     
     return ffmpeg_node
-
-
-async def _assemble_async(
-    videos: List[str],
-    audios: List[str],
-    output: str,
-    quality: str,
-    timeout: int,
-) -> Dict[str, Any]:
-    # Async wrapper over the synchronous _assemble_sync function, using asyncio.to_thread to run it in a separate thread.
-    import asyncio
-    return await asyncio.to_thread(
-        _assemble_sync, videos, audios, output, quality, timeout
-    )

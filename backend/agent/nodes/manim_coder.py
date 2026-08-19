@@ -1,18 +1,15 @@
 import json
 import subprocess
-import re
-import time
 from pathlib import Path
 from typing import Optional
 
+from LLM.llm import LLM
 from backend.agent.state import AgentState
 
 from moviepy import VideoFileClip
 
-
-# PROMPTS
-
-MANIM_CODER_SYSTEM_PROMPT = """You are an expert in Manim Community v0.19. Generate strictly clean, working Python code for ONE scene.
+MANIM_CODER_SYSTEM_PROMPT2 = """
+You are an expert in Manim Community v0.20.1. Generate strictly clean, working Python code for ONE scene based on the narration.
 
 # REQUIREMENTS
 
@@ -47,63 +44,137 @@ MANIM_CODER_SYSTEM_PROMPT = """You are an expert in Manim Community v0.19. Gener
 - The animations should move all along with the narration, so make sure the timing of animations matches the narration positions. The narrator reads around 2 words per second, make sure that the animations are not too fast or too slow compared to the narration and they keep track of the narration.
 
 # OUTPUT FORMAT
-Return strictly valid, executable Python code.
-Do NOT use markdown code blocks or backticks. Do NOT output ```python.
-The very first characters of your output must be "from manim import *".
-OUTPUT ONLY THE CODE, NO EXPLANATIONS, NO COMMENTS, NO MARKDOWN, NO TEXT.
-DO NOT OUTPUT ANY THROUGHTS OR INTERNAL REASONING. DO NOT OUTPUT ANYTHING ELSE EXCEPT THE PYTHON CODE.
+Return strictly valid PYTHON CODE only.
+
+Put the Python code inside a fenced block, for example:
+```python\nfrom manim import *\n...\n```
+
+The code must contain only the Manim code needed for the scene.
+The code must start with "from manim import *" after the fence is removed.
+
+OUTPUT ONLY THE VALID PYTHON CODE, NOTHING ELSE, NOT ANY WORDS FROM THOUGHT PROCESS SHOULD APPEAR OUTSIDE THE CODE.
+"""
+
+
+MANIM_CODER_SYSTEM_PROMPT = """
+You are an expert in Manim Community v0.20.1. Generate strictly clean, working Python code for ONE scene based on the narration.
+
+# REQUIREMENTS
+
+## Imports & Class
+- Use ONLY: `from manim import *`
+- Define exactly ONE class inheriting from `Scene`, named `Scene{scene_id}`.
+- Implement `def construct(self):` with all logic inside.
+
+## Visual Design (SHOW, DON'T TELL)
+- MAXIMIZE visual elements (shapes, diagrams, abstract representations using VGroup).
+- MINIMIZE text on screen. DO NOT just write the narration on the screen.
+- Use `Text` or `MarkupText` ONLY for short titles, key terms, or labels.
+- Build complex, appealing visuals by combining basic shapes (Circle, Rectangle, Line, Arrow) and animating them fluidly.
+
+## Allowed Constructs
+- Mobjects: Text, MathTex, Tex, MarkupText, Paragraph, Code, Circle, Square, Rectangle, Polygon, RegularPolygon, Arrow, DoubleArrow, Line, Dot, VGroup
+- Layout: UP, DOWN, LEFT, RIGHT, ORIGIN, UL, UR, DL, DR
+- Colors: WHITE, BLACK, RED, GREEN, BLUE, YELLOW, ORANGE, PURPLE, PINK, GREY, TEAL
+- Animations: Create, Write, FadeIn, FadeOut, Transform, ReplacementTransform, GrowFromCenter, Indicate
+- Composition: AnimationGroup, Succession, Wait
+- Positioning: .to_edge(), .move_to(), .next_to(), .align_to()
+- Grouping: VGroup (Use VGroup().arrange(DOWN) to prevent overlapping of multiple elements)
+- Modifiers: .scale(), .set_color(), .set_opacity()
+
+## STRICT Constraints
+- NO SVGMobject, NO ThreeDScene, NO updaters.
+- NO absolute manual coordinates (e.g., avoid LEFT * 3).
+- NEVER invent properties for coordinates (DO NOT use .center_left, etc.). ALWAYS use .get_left(), .get_right(), .get_center().
+- NO external imports (os, sys, requests, etc.).
+- ALWAYS prefix MathTex and Tex strings with 'r' (raw string).
+- Remove elements from the screen when they are no longer relevant to the narration.
+- Make sure the animations are fluid and match the narration timing. Avoid abrupt transitions or long pauses.
+- Make sure the positioning is visually appealing and that text do not overlap.
+- Be cafeful that the end of the animation is smooth and that the narration has a smooth end.
+
+## Timing & Synchronization
+- Total scene duration needs to be EXACTLY {scene_duration} seconds.
+- The narrator reads at ~2 words per second. 
+- You MUST break down the narration sentence by sentence.
+- Add Python comments (e.g., `# Narration: "Imagine speaking into a device..." (~3 seconds)`) before each animation block to explicitly show your timing logic.
+- Use `run_time=...` on `self.play()` and `self.wait(...)` to perfectly pad the time so the visual actions map exactly to the words being spoken.
+
+# OUTPUT FORMAT
+Return strictly valid PYTHON CODE ONLY. DO NOT output JSON. DO NOT output any reasoning outside the code block.
+
+Put the Python code inside a fenced markdown block:
+```python
+from manim import *
+...
+OUTPUT ONLY THE FENCED PYTHON CODE.
+"""
+
+
+MANIM_CODER_USER_TEMPLATE2 = """Scene {scene_id}: {scene_title}
+
+Visual hint: {visual_hint}
+
+Narration(for context): {narration}
+
+{feedback_section}
+
+Generate the scene response as PYTHON CODE ONLY.
+The code must be inside a fenced Python block (```python ... ```).
+DO NOT output any thoughts, JSON, or text outside the code block.
+
+MAKE SURE THE ANIMATIONS ARE FLUID AND HAVE A GOOD POSITIONING AND THAT THE ANIMATIONS ARE VISUALLY APPEALING EVEN IF YOU NEED TO GENERATE MUCH MORE CODE FOR IT.
+THE PYTHON CODE SHOULD REFLECT ALSO THE NARRATION TIMING, AND THE ANIMATIONS SHOULD MATCH THE NARRATION TIMING AND THE THINGS THAT ARE SAID IN THE NARRATION.
+OUTPUT ONLY THE VALID PYTHON CODE.
 """
 
 
 MANIM_CODER_USER_TEMPLATE = """Scene {scene_id}: {scene_title}
 
-Visual description: {visual_hint}
-
-Narration (for context): {narration}
+Narration (Total Duration: {scene_duration}s): 
+"{narration}"
 
 {feedback_section}
 
-Generate the Manim code for this scene. Output ONLY the Python code, no markdown.
-DO NOT OUTPUT ANY THROUGHTS OR INTERNAL REASONING. DO NOT OUTPUT ANYTHING ELSE EXCEPT THE PYTHON CODE.
+Generate the scene response as PYTHON CODE ONLY.
+The code must be inside a fenced Python block (```python ... ```).
+
+CRITICAL INSTRUCTIONS:
+1. FOCUS ON VISUALS: Draw diagrams, icons, or abstract concepts using geometric shapes. Do NOT just print the narration as Text.
+2. SYNCHRONIZE EXACTLY: Place fragments of the narration as comments before the respective `self.play()` calls. 
+3. Calculate your `run_time` and `self.wait()` so the sum of all durations is exactly {scene_duration} seconds.
+
+OUTPUT ONLY THE VALID PYTHON CODE.
 """
 
-
-# HELPERS
-
 def _extract_code(response: str) -> str:
-    text = response.strip()
-    
-    # Eliminate ```python ... ```
-    if "```python" in text:
-        match = re.search(r"```python\s*(.*?)\s*```", text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-    
-    # Eliminate ``` ... ```
-    if "```" in text:
-        match = re.search(r"```\s*(.*?)\s*```", text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-    
-    # Return as-is if no code block found
-    return text
+    response = response.strip()
+
+    if response.startswith("```") and response.endswith("```"):
+        code_content = response[3:-3].strip()
+        if code_content.startswith("python"):
+            code_content = code_content[6:].strip()
+        return code_content
+
+    return response.strip()
 
 
-# Save the generated code to a .py file and return the path
+# Save the generated code and return the path
 def _save_code_to_file(code: str, output_dir: str, scene_id: int) -> str:
-    output_path = Path(output_dir)
+    output_path = Path(output_dir + "/code")
     output_path.mkdir(parents=True, exist_ok=True)
     
     file_path = output_path / f"scene_{scene_id}.py"
     file_path.write_text(code, encoding="utf-8")
+
     return str(file_path)
 
-
-# Validate the generated code using Track B's validator
-def _validate_with_track_b(scene_file: str) -> tuple[bool, str]:
+# Validate the generated code
+def _validate_code(scene_file: str) -> tuple[bool, str]:
+    # Returns (success, error_message)
     try:
         result = subprocess.run(
-            ["python", "-m", "tools.manim.cli", "validate", scene_file],
+            ["python3", "-m", "tools.manim.cli", "validate", scene_file],
             capture_output=True,
             text=True,
             timeout=10,
@@ -120,17 +191,17 @@ def _validate_with_track_b(scene_file: str) -> tuple[bool, str]:
         return False, f"Validator error: {e}"
 
 
-# Render the generated code using Track B's renderer
+# Render the generated code
 # Returns (success, error_message, json_output)
-def _render_with_track_b(
+def _render_scene(
     scene_file: str, 
     scene_class_name: str, 
     output_video: str
-) -> tuple[bool, str, Optional[str]]:
+) -> tuple[bool, str, Optional[dict[str, object]]]:
     try:
         result = subprocess.run(
             [
-                "python", "-m", "tools.manim.cli", "render",
+                "python3", "-m", "tools.manim.cli", "render",
                 scene_file, scene_class_name,
                 "--output", output_video,
             ],
@@ -160,10 +231,11 @@ def _render_with_track_b(
 
 
 # Fallback code generation for a simple static scene
-def _generate_fallback_code(scene_id: int, visual_hint: str) -> str:
-    text = visual_hint[:80].replace('"', "'").replace("\n", " ")
+def _generate_fallback_code(scene_id: int, narration: str, duration: int) -> str:
+    text = narration[:80].replace('"', "'").replace("\n", " ")
     
-    return f'''from manim import *
+    return f'''
+from manim import *
 
 class Scene{scene_id}(Scene):
     def construct(self):
@@ -177,194 +249,175 @@ class Scene{scene_id}(Scene):
         
         self.play(Write(title))
         self.play(FadeIn(body))
-        self.wait(3)
+        self.wait({duration})
         self.play(FadeOut(title), FadeOut(body))
 '''
-
 
 # Render a fallback scene if all attempts fail
 def _generate_fallback_render(
     scene_id: int,
-    visual_hint: str,
+    narration: str,
     output_dir: str,
-) -> tuple[bool, str, Optional[str]]:
-    code = _generate_fallback_code(scene_id, visual_hint)
+    duration: int
+) -> tuple[bool, str, Optional[dict[str, object]]]:
+    code = _generate_fallback_code(scene_id, narration, duration)
     scene_file = _save_code_to_file(code, output_dir, scene_id)
     scene_class = f"Scene{scene_id}"
-    output_video = str(Path(output_dir) / f"scene_{scene_id}.mp4")
+    output_video = str(Path(output_dir + "/mp4") / f"scene_{scene_id}.mp4")
     
-    return _render_with_track_b(scene_file, scene_class, output_video)
+    return _render_scene(scene_file, scene_class, output_video)
 
-
-# MAIN NODE
-
-def make_manim_coder_node(llm, output_dir: str = "/tmp/edumanim/scenes", max_retries: int = 2):
+def _generate_scene(llm, output_dir: str, state: AgentState, max_retries: int) -> AgentState:
+    scenes = state.get("scenes", [])
+    current_idx = state.get("current_scene_idx", 0)
     
-    def manim_coder_node(state: AgentState) -> AgentState:
-        # SETUP
-        scenes = state.get("scenes", [])
-        current_idx = state.get("current_scene_idx", 0)
-        
-        if current_idx >= len(scenes):
-            return state
-        
-        scene = scenes[current_idx]
-        scene_id = scene.get("id", current_idx + 1)
-        scene_title = scene.get("title", f"Scene {scene_id}")
-        visual_hint = scene.get("visual_hint", "")
-        narration = scene.get("narration", "")
-        
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        
-        # RETRY LOOP: generate -> validate -> render
-        code = None
-        video_path = None
-        last_error = None
-        used_fallback = False
-        
-        for attempt in range(max_retries + 1):
-            try:                
-                # --- 1. GENERATE code (LLM) ---
-                if attempt == 0:
-                    feedback = ""
-                else:
-                    feedback = f"\n\nPREVIOUS ATTEMPT FAILED:\n{last_error}\n\nPlease fix the code and try again."
-                
-                user_prompt = MANIM_CODER_USER_TEMPLATE.format(
-                    scene_id=scene_id,
-                    scene_title=scene_title,
-                    visual_hint=visual_hint,
-                    narration=narration,
-                    feedback_section=feedback,
-                )
-
-                duration = state["audio_tracks"].get(scene_id, {}).get("duration_sec", 10)
-                
-                system_prompt = MANIM_CODER_SYSTEM_PROMPT.replace("{scene_id}", str(scene_id)).replace("{scene_duration}", str(duration))
-                
-                start = time.time()
-                response = llm.generate(
-                    system_instruction=system_prompt,
-                    prompt=user_prompt,
-                )
-                gen_time = time.time() - start
-                
-                code = _extract_code(response)
-                
-                # --- 2. SAVE to file ---
-                scene_file = _save_code_to_file(code, output_dir, scene_id)
-                
-                # --- 3. VALIDATE (Track B) ---
-                is_valid, val_error = _validate_with_track_b(scene_file)
-                if not is_valid:
-                    last_error = f"Validation failed: {val_error}"
-                    if attempt < max_retries:
-                        continue
-                    else:
-                        break
-                                
-                # --- 4. RENDER (Track B) ---
-                output_video = str(Path(output_dir) / f"scene_{scene_id}.mp4")
-                success, render_error, render_output = _render_with_track_b(
-                    scene_file, f"Scene{scene_id}", output_video
-                )
-
-                # --- 5. CHECK duration to match with the duration of the audio ---
-                duration_real = 0
-                with VideoFileClip(render_output.get("video_path", output_video)) as clip:
-                    duration_real = clip.duration
-
-                print(f"Scene {scene_id} rendered in {gen_time:.2f}s. Expected duration: {duration:.2f}s, actual: {duration_real:.2f}s.\n\n")
+    if current_idx >= len(scenes):
+        return state
+    
+    scene = scenes[current_idx]
+    scene_id = scene.get("id", current_idx + 1)
+    scene_title = scene.get("title", f"Scene {scene_id}")
+    narration = scene.get("narration", "")
+    
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    # Retry loop: generate -> validate -> render
+    code = None
+    video_path: Optional[str] = None
+    last_error = None
+    used_fallback = False
+    duration = state["audio_tracks"].get(scene_id, {}).get("duration_sec", 10)
+    
+    for attempt in range(max_retries + 1):
+        try:                
+            # Generate the code
+            if attempt == 0:
+                feedback = ""
+            else:
+                feedback = f"\n\nPREVIOUS ATTEMPT FAILED:\n{last_error}\n\nPlease fix the code and try again."
             
-                if abs(duration - duration_real) > 1:
-                    success = False
-                    last_error = f"Duration mismatch: expected {duration}, got {duration_real}. Make sure the animations match the narration timing ({duration} seconds)."
-
-                
-                if success:
-                    video_path = render_output.get("video_path", output_video)
-                    break
-                else:
-                    last_error = f"Render failed: {render_error}"
-                    if attempt < max_retries:
-                        continue
-                    else:
-                        break
+            user_prompt = MANIM_CODER_USER_TEMPLATE.format(
+                scene_id=scene_id,
+                scene_title=scene_title,
+                scene_duration=duration,
+                narration=narration,
+                feedback_section=feedback,
+            )
             
-            except Exception as e:
-                print(f"Exception during Manim Coder node: {e}")
-                last_error = f"{type(e).__name__}: {str(e)}"
+            system_prompt = MANIM_CODER_SYSTEM_PROMPT.replace("{scene_id}", str(scene_id)).replace("{scene_duration}", str(duration))
+            
+            response = llm.generate(
+                system_instruction=system_prompt,
+                prompt=user_prompt,
+                temperature=0.3,
+            )
+            
+            code = _extract_code(response)
+            
+            # Save the code to file
+            scene_file = _save_code_to_file(code, output_dir, scene_id)
+            
+            # Validate the code
+            is_valid, val_error = _validate_code(scene_file)
+            if not is_valid:
+                last_error = f"Validation failed: {val_error}"
                 if attempt < max_retries:
                     continue
                 else:
                     break
-        
-        # FALLBACK if all attempts fail
-        if video_path is None:
-            used_fallback = True
-            
-            success, fb_error, fb_output = _generate_fallback_render(
-                scene_id, visual_hint, output_dir
+                            
+            # Render scene
+            output_video = str(Path(output_dir + "/mp4") / f"scene_{scene_id}.mp4")
+            success, render_error, render_output = _render_scene(
+                scene_file, f"Scene{scene_id}", output_video
             )
-            
-            if success and fb_output:
-                video_path = fb_output.get("video_path")
-                code = _generate_fallback_code(scene_id, visual_hint)
+
+            if not success:
+                last_error = f"Render failed: {render_error}"
+                if attempt < max_retries:
+                    continue
+                else:
+                    break
+
+            # Check duration to match with the duration of the audio
+            if render_output is None:
+                raise RuntimeError("Renderer did not return metadata")
+
+            rendered_video_path = str(render_output.get("video_path", output_video))
+            duration_real = 0
+            with VideoFileClip(rendered_video_path) as clip:
+                duration_real = clip.duration
+
+            print(f"Scene {scene_id} rendered. Expected duration: {duration:.2f}s, actual: {duration_real:.2f}s.\n\n")
+
+            if abs(duration - duration_real) > 1:
+                last_error = f"Duration mismatch: expected {duration}, got {duration_real}. Make sure the animations match the narration timing ({duration} seconds)."
+                if attempt < max_retries:
+                    continue
+                else:
+                    break
+
+            video_path = rendered_video_path
+            break
+        
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {str(e)}"
+            if attempt < max_retries:
+                continue
             else:
-                state["errors"] = state.get("errors", []) + [
-                    f"Manim Coder scene {scene_id}: all attempts + fallback failed. Last: {last_error}, Fallback: {fb_error}"
-                ]
-                video_path = None
+                break
+    
+    # Fallback if all attempts fail
+    if video_path is None:
+        used_fallback = True
         
-        # UPDATE STATE
-        scene_codes = state.get("scene_codes", {})
-        scene_videos = state.get("scene_videos", {})
+        success, fb_error, fb_output = _generate_fallback_render(
+            scene_id, narration, output_dir, duration
+        )
         
-        if code:
-            scene_codes[scene_id] = code
-        if video_path:
-            scene_videos[scene_id] = video_path
-        
-        state["scene_codes"] = scene_codes
-        state["scene_videos"] = scene_videos
-        state["current_scene_idx"] = current_idx + 1
-        state["needs_retry"] = False
-        state["last_error"] = None
-        state["retries_for_current_scene"] = 0
-        state["used_fallback"] = state.get("used_fallback", False) or used_fallback
-        
+        if success and fb_output:
+            video_path = str(fb_output.get("video_path", ""))
+            code = _generate_fallback_code(scene_id, narration, duration)
+        else:
+            state["errors"] = state.get("errors", []) + [
+                f"Manim Coder scene {scene_id}: all attempts + fallback failed. Last: {last_error}, Fallback: {fb_error}"
+            ]
+            video_path = None
+    
+    # Update the state for this scene
+    scene_codes = state.get("scene_codes", {})
+    scene_videos = state.get("scene_videos", {})
+    
+    if code:
+        scene_codes[scene_id] = code
+    if video_path:
+        scene_videos[scene_id] = video_path
+    
+    state["scene_codes"] = scene_codes
+    state["scene_videos"] = scene_videos
+    state["current_scene_idx"] = current_idx + 1
+    state["needs_retry"] = False
+    state["last_error"] = None
+    state["retries_for_current_scene"] = 0
+    state["used_fallback"] = state.get("used_fallback", False) or used_fallback
+    
+    return state
+
+def make_manim_coder_node(llm: LLM, output_dir: str, max_retries: int = 2):
+    
+    def manim_coder_node(state: AgentState) -> AgentState:
+        total = len(state.get("scenes", []))
+
+        for i in range(total):
+            print(f"Processing scene {i + 1}/{total}...")
+    
+            state = _generate_scene(llm, output_dir, state, max_retries)
+            
+            scene_id = state["scenes"][i].get("id", i + 1)
+            video = state["scene_videos"].get(scene_id)
+
+            print(f"Scene {i + 1}/{total} done. Video: {video}\n\n")
+            
         return state
     
     return manim_coder_node
-
-
-# HELPER: process ALL scenes
-
-async def process_all_scenes(
-    state: AgentState,
-    llm,
-    output_dir: str = "/tmp/edumanim/scenes",
-    max_retries: int = 2,
-    progress_callback=None,
-) -> AgentState:
-    total = len(state.get("scenes", []))
-    
-    manim_coder = make_manim_coder_node(llm, output_dir, max_retries)
-    
-    for i in range(total):
-        print(f"Processing scene {i + 1}/{total}...")
-
-        state = manim_coder(state)
-        
-        scene_id = state["scenes"][i].get("id", i + 1)
-        video = state["scene_videos"].get(scene_id)
-
-        if progress_callback:
-            await progress_callback("manim_scene_done", {
-                "scene_id": scene_id,
-                "video_path": video,
-                "progress": (i + 1) / total,
-            })
-        print(f"Scene {i + 1}/{total} done. Video: {video}\n\n")
-    
-    return state

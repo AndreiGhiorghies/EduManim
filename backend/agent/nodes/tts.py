@@ -1,4 +1,3 @@
-import asyncio
 from pathlib import Path
 from typing import Any, Dict
 
@@ -6,26 +5,23 @@ from backend.agent.state import AgentState
 from tools.tts.synthesize import Synthesizer, SynthesisError, _wav_duration
 
 
-# HELPERS
-
-def _synthesize_sync(
+def _synthesize(
     synthesizer: Synthesizer,
     text: str,
     output_path: str,
     voice: str = "narrator",
     language: str = "en",
 ) -> Dict[str, Any]:
-    """
-    Synchronous TTS synthesis using a cached Synthesizer instance.
-
-    Returns:
-        {"success": bool, "audio_path": str, "duration_sec": float, "error": str|None}
-    """
+    # Synthesize the text to speech and save to output_path
+    # Returns {"success": bool, "audio_path": str, "duration_sec": float, "error": str|None}
 
     try:
         print("Calling TTS engine with text:", text, "\n\n", "Voice: ", voice, flush=True)
+
         audio_path = synthesizer.synthesize(text, output_path, voice=voice, language=language)
+
         print("TTS engine returned:", audio_path, "\n\n", flush=True)
+
         return {
             "success": True,
             "audio_path": audio_path,
@@ -33,7 +29,6 @@ def _synthesize_sync(
             "error": None,
         }
     except SynthesisError as exc:
-        print(f"TTS synthesis error: {exc}\n\n", flush=True)
         return {
             "success": False,
             "audio_path": None,
@@ -41,7 +36,6 @@ def _synthesize_sync(
             "error": str(exc),
         }
     except Exception as e:
-        print(f"TTS engine exception: {type(e).__name__}: {str(e)}\n\n", flush=True)
         return {
             "success": False,
             "audio_path": None,
@@ -49,33 +43,36 @@ def _synthesize_sync(
             "error": f"{type(e).__name__}: {str(e)}",
         }
 
+def _synthesize_scene(output_path: Path, synthesizer: Synthesizer, voice: str, language: str, scene: dict) -> tuple[int, dict]:
+    scene_id = scene.get("id", 0)
+    scene_title = scene.get("title", f"Scene {scene_id}")
+    narration = scene.get("narration", "").strip()
+    
+    if not narration:
+        return scene_id, {
+            "success": False,
+            "audio_path": None,
+            "duration_sec": 0,
+            "error": "Empty narration",
+        }
+    
+    audio_file = str(output_path / f"narration_{scene_id}.wav")
 
-def _list_voices_sync() -> list:
-    """Obtains the list of available voices by calling the TTS CLI."""
-    try:
-        result = subprocess.run(
-            ["python", "-m", "tools.tts.cli", "list-voices"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            data = json.loads(result.stdout)
-            return data if isinstance(data, list) else []
-    except Exception as e:
-        pass
-    return []
+    print(f"Synthesizing TTS for scene {scene_id} ('{scene_title}') to '{audio_file}'...\n\n", flush=True)
+    
+    result = _synthesize(synthesizer, narration, audio_file, voice, language)
 
+    print(scene_id, scene_title, result, "\n\n", flush=True)
+    
+    return scene_id, result
 
-# MAIN NODE
 
 def make_tts_node(
-    output_dir: str = "/tmp/edumanim/audio",
+    output_dir: str = "./output/audio",
     voice: str = "narrator",
-    language: str = "en",
-    timeout_per_scene: int = 1800,
+    language: str = "en"
 ):  
-    async def tts_node(state: AgentState) -> AgentState:
+    def tts_node(state: AgentState) -> AgentState:
         scenes = state.get("scenes", [])
         
         if not scenes:
@@ -88,46 +85,13 @@ def make_tts_node(
         output_path.mkdir(parents=True, exist_ok=True)
 
         print("Initializing TTS engine once for all scenes...\n\n", flush=True)
-        synthesizer = await asyncio.to_thread(Synthesizer)
-        print("TTS engine initialized.\n\n", flush=True)
+        synthesizer = Synthesizer()
+        print("TTS engine initialized.\n\n", flush=True)        
         
-        # Prepare async tasks for each scene
-        async def synthesize_scene(scene: dict) -> tuple[int, dict]:
-            scene_id = scene.get("id", 0)
-            scene_title = scene.get("title", f"Scene {scene_id}")
-            narration = scene.get("narration", "").strip()
-            
-            if not narration:
-                return scene_id, {
-                    "success": False,
-                    "audio_path": None,
-                    "duration_sec": 0,
-                    "error": "Empty narration",
-                }
-            
-            audio_file = str(output_path / f"narration_{scene_id}.wav")
-
-            print(f"Synthesizing TTS for scene {scene_id} ('{scene_title}') to '{audio_file}'...\n\n", flush=True)
-            
-            # Call Track B in a thread pool (does not block event loop)
-            result = await asyncio.to_thread(
-                _synthesize_sync,
-                synthesizer,
-                narration,
-                audio_file,
-                voice,
-                language,
-            )
-
-            print(scene_id, scene_title, result, "\n\n", flush=True)
-            
-            return scene_id, result
-        
-        # Run all scenes (sequentially because in parallel takes too much memory)
         results = []
         for scene in scenes:
             try:
-                res = await synthesize_scene(scene)
+                res = _synthesize_scene(output_path, synthesizer, voice, language, scene)
                 results.append(res)
             except Exception as e:
                 results.append(e)

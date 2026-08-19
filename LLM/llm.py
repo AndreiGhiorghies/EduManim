@@ -4,7 +4,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class LLM:
+    _instance = None
+
+    # Make it singleton to ensure only one instance of the llm is loaded into memory
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(LLM, cls).__new__(cls)
+            cls._instance._initialized = False
+        
+        return cls._instance
+    
     def __init__(self):
+        if getattr(self, '_initialized', False):
+            return
+        
         route = os.getenv("ROUTE") or ""
         if route == "":
             raise ValueError("ROUTE is not set in the environment variables. Acceptable values are 'LOCAL' or 'REMOTE'.")
@@ -18,20 +31,9 @@ class LLM:
         else:
             raise ValueError("Invalid ROUTE value. Acceptable values are 'LOCAL' or 'REMOTE'.")
 
-    def generate(self, prompt, system_instruction: str = "You are a helpful assistant.", number_of_attempts: int = 2, temperature: float = 0.0, max_tokens: int = 16384) -> str:
-        if isinstance(prompt, list):
-            extracted_prompt = ""
-            extracted_system = system_instruction
-            
-            for message in prompt:
-                if hasattr(message, 'type'):
-                    if message.type == 'system':
-                        extracted_system = message.content
-                    elif message.type in ['human', 'user']:
-                        extracted_prompt += message.content + "\n"
-            
-            prompt = extracted_prompt.strip()
-            system_instruction = extracted_system
+        self._initialized = True
+
+    def generate(self, prompt, system_instruction: str = "You are a helpful assistant.", number_of_attempts: int = 2, temperature: float = 0.0, max_tokens: int = 4096) -> str:
 
         print("Made LLM call with prompt:", prompt, "\n\n")
 

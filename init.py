@@ -1,20 +1,27 @@
 import os
-
+import glob
 from huggingface_hub import snapshot_download
 
-# Run just one time
-os.makedirs("./LLM/Models", exist_ok=True)
+MODEL_DIR = "./LLM/Models"
+REPO_ID = "Qwen/Qwen2.5-32B-Instruct-GGUF"
+FILE_PATTERN = "*q8_0*.gguf"
 
-snapshot_download(
-    repo_id="Qwen/Qwen2.5-3B-Instruct-GGUF",
-    local_dir="./LLM/Models",
-    allow_patterns=["qwen2.5-3b-instruct-q4_k_m.gguf"]
-)
+def ensure_model_downloaded():
+    os.makedirs(MODEL_DIR, exist_ok=True)
 
-""" snapshot_download(
-    repo_id="Qwen/Qwen2.5-32B-Instruct-GGUF",
-    local_dir="./LLM/Models",
-    allow_patterns=["*q8_0*.gguf"]
-) """
+    search_path = os.path.join(MODEL_DIR, FILE_PATTERN)
+    
+    existing_files = glob.glob(search_path)
 
+    if existing_files:
+        print(f"LLM Model found: {len(existing_files)}")
+    else:
+        print("LLM Model not found locally. Starting download from HuggingFace...")
+        snapshot_download(
+            repo_id=REPO_ID,
+            local_dir=MODEL_DIR,
+            allow_patterns=[FILE_PATTERN]
+        )
+        print("Download completed")
 
+ensure_model_downloaded()

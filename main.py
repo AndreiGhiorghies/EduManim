@@ -13,7 +13,7 @@ if __name__ == "__main__":
 # docker build -t devmaster-local -f Dockerfile .
 
 # Run the Docker container with the following command:
-# Windows(PowerShell): docker run -d --name edu-manim -v ${PWD}:/app devmaster-local
+# Windows(PowerShell): docker run -d --name edu-manim --gpus all -p 7860:7860 -v ${PWD}:/app devmaster-local
 # Linux(Ubuntu): docker run -d --name edu-manim -v $(pwd):/app devmaster-local
 
 # To access the running container, you can use the following command, where you can run the python scripts:

@@ -16,36 +16,13 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import requests
  
-# frontend/app.py needs to reach the sibling tools/rag/ package:
-#   edumanim/
-#   ├── tools/rag/...
-#   └── frontend/app.py   <- this file
-# Running `python frontend/app.py` puts frontend/ on sys.path, not the
-# project root, so tools/ wouldn't be importable without this.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
- 
-try:
-    from tools.rag.config import DEFAULT_KB_ID
-    from tools.rag.ingest import delete_document, ingest_file, list_documents, reindex_all
-    from tools.rag.retrieve import Retriever
- 
-    RAG_AVAILABLE = True
-except ImportError as _rag_import_error:
-    RAG_AVAILABLE = False
-    DEFAULT_KB_ID = "default"
-    Retriever = None
-    _RAG_IMPORT_ERROR_MSG = (
-        f"RAG module not found at {_PROJECT_ROOT / 'tools' / 'rag'} "
-        f"({_rag_import_error}). Knowledge Base features are disabled "
-        f"until tools/rag/ is present with its dependencies installed."
-    )
+
  
 API_BASE_URL = os.environ.get("EDUMANIM_API_URL", "http://127.0.0.1:8000").rstrip("/")
 API_POLL_SECONDS = float(os.environ.get("EDUMANIM_API_POLL_SECONDS", "1.5"))
 GENERATED_VIDEO_DIR = Path(os.environ.get("EDUMANIM_DATA_ROOT", "./data")) / "generated_videos"
 GENERATED_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+MAX_VIDEO_SLOTS = 15
  
 # No system ffmpeg, no bundled .ttf files needed:
 #  - imageio-ffmpeg ships its own ffmpeg binary as a pip package (installed
@@ -108,6 +85,12 @@ class ApiBackend:
                         file_handle.write(chunk)
         return str(local_path)
 
+    def list_video_names(self) -> list[dict]:
+        """Fetch only video filenames from the backend — no filesystem paths."""
+        response = self.session.get(f"{self.base_url}/api/videos/names", timeout=10)
+        response.raise_for_status()
+        return response.json()
+
     def list_videos(self) -> list[dict]:
         response = self.session.get(f"{self.base_url}/api/videos", timeout=60)
         response.raise_for_status()
@@ -139,25 +122,17 @@ def _fmt_timestamp(seconds: float) -> str:
  
  
 def format_transcript(scenes: list[dict]) -> str:
-    """Scene-by-scene transcript with estimated timestamps (~140 wpm speaking
-    pace), rendered as clean HTML rather than raw text.
-    """
+    """Scene-by-scene transcript rendered as clean HTML."""
     rows = []
-    t = 0.0
     for i, scene in enumerate(scenes, start=1):
-        words = len(scene["narration"].split())
-        duration = max(6.0, words / 2.3)
-        start, end = _fmt_timestamp(t), _fmt_timestamp(t + duration)
         rows.append(f"""
         <div class="em-transcript-scene">
           <div class="em-transcript-head">
             <span class="em-transcript-title">Scene {i} — {scene['title']}</span>
-            <span class="em-transcript-time">{start}–{end}</span>
           </div>
           <p class="em-transcript-body">{scene['narration']}</p>
         </div>
         """)
-        t += duration
     return f"<div class='em-transcript'>{''.join(rows)}</div>"
 
 
@@ -195,53 +170,32 @@ def render_video_gallery(videos: list[dict]) -> str:
     cards = []
     for video in videos:
         job_id = escape(str(video.get("job_id", "")))
+        name = escape(str(video.get("name") or f"{job_id}.mp4"))
         completed_at = escape(str(video.get("completed_at", "")))
         video_url = f"{API_BASE_URL}/api/videos/{job_id}"
+        safe_name = name.replace("'", "\\'").replace('"', '\\"')
         cards.append(
             f"""
             <div class='em-kb-row' style='display:flex; justify-content:space-between; gap:12px;'>
               <div>
-                <div class='em-kb-label'><strong>{job_id}</strong></div>
+                <div class='em-kb-label'><strong>{name}</strong></div>
                 <div style='color: var(--em-muted); font-size: 12px;'>Completed: {completed_at}</div>
               </div>
-              <a href='{video_url}' target='_blank' style='color: var(--em-teal); text-decoration:none; align-self:center;'>Open</a>
+              
+              <!-- Un simplu tag <a> face toată magia direct din browser -->
+              <a href="{video_url}" download="{safe_name}" target="_blank"
+                 style='color:var(--em-teal); text-decoration:none; font-size:13px; align-self:center; font-weight:bold;'>
+                ⬇ Download
+              </a>
+              
             </div>
             """
         )
     return "<div class='em-transcript'>" + "".join(cards) + "</div>"
 
 
-backend = ApiBackend()
-if RAG_AVAILABLE and Retriever is not None:
-    _retriever = Retriever()
-else:
-    _retriever = None
- 
- 
-def _resolve_kb_id(kb_state) -> str:
-    return kb_state or DEFAULT_KB_ID
- 
- 
-def _real_research_thought(query: str, kb_id: str | None) -> str:
-    """Called from the 'researching' progress step -- runs your actual
-    hybrid BM25+embedding+rerank retrieval and surfaces a real result
-    (or an honest 'nothing indexed' message) in the agent thoughts panel.
-    """
-    if _retriever is None:
-        return f"→ kb_search('{query[:40]}') skipped: retriever unavailable"
 
-    kb_id = _resolve_kb_id(kb_id)
-    try:
-        hits = _retriever.query(query, top_k=1, kb_id=kb_id)
-    except Exception as e:
-        return f"→ kb_search('{query[:40]}') failed: {e}"
- 
-    if not hits:
-        return f"→ kb_search('{query[:40]}') → 0 results (no docs indexed in kb='{kb_id}')"
- 
-    top = hits[0]
-    snippet = top["text"][:90].replace("\n", " ")
-    return f"→ kb_search('{query[:40]}') → top hit ({top['score']:.2f}) {top['source']} p.{top['page']}: \"{snippet}…\""
+backend = ApiBackend()
  
 # ============================================================================
 # THEME + CSS
@@ -459,7 +413,7 @@ h1, h2, h3, .em-display {
 # ============================================================================
  
  
-def handle_send(message, history, kb_state, voice_state, quality_state):
+def handle_send(message, history, voice_state, quality_state):
     if not message or not message.strip():
         yield history, "", "", gr.update(visible=False), gr.update(visible=False)
         return
@@ -512,7 +466,6 @@ def handle_send(message, history, kb_state, voice_state, quality_state):
         video_path = backend.download_video(job["id"])
         transcript_html = gr.update(value=build_transcript_from_job(final_job), visible=True)
         video_update = gr.update(value=video_path, visible=True)
-        videos_html = render_video_gallery(backend.list_videos())
         reply = "Here's your explainer video 🎬"
 
         history[-1]["content"] = reply
@@ -552,114 +505,41 @@ def _progress_fraction(job_state: dict) -> float:
         return 1.0
     return 0.0
 
-
 def refresh_video_gallery():
     try:
-        return render_video_gallery(backend.list_videos())
-    except Exception as exc:  # noqa: BLE001 - show backend availability issues in the UI instead of crashing
-        return f"<div class='em-empty'>Could not load videos from API: {escape(str(exc))}</div>"
- 
- 
-# ============================================================================
-# KNOWLEDGE BASE TAB LOGIC
-# ============================================================================
- 
-MAX_KB_SLOTS = 15  # fixed number of list rows; hidden/shown based on doc count
-                    # (avoids gr.render, which isn't available in gradio==4.20.0)
- 
- 
-def refresh_kb_slots(kb_state):
-    """Build the full set of gr.update()s for every KB list slot + empty
-    state, reading from the REAL registry on disk (tools/rag/registry.py),
-    not a mock.
-    """
-    if not RAG_AVAILABLE:
-        docs = []
-    else:
-        kb_id = _resolve_kb_id(kb_state)
-        docs = list(reversed(list_documents(kb_id=kb_id)))
- 
+        videos = backend.list_video_names()
+    except Exception as exc:
+        videos = []
+        print(f"Eroare la încărcarea videoclipurilor: {exc}")
+
     updates = []
-    for i in range(MAX_KB_SLOTS):
-        if i < len(docs):
-            d = docs[i]
-            uploaded = d["uploaded_at"].replace("T", " ")[:16]
-            label = f"<span class='em-kb-label'><strong>{d['filename']}</strong> — {d['chunks']} chunks · {uploaded}</span>"
-            updates += [gr.update(visible=True), gr.update(value=label), d["doc_id"]]
+    updates.append(gr.update(visible=len(videos) == 0))
+
+    for i in range(MAX_VIDEO_SLOTS):
+        if i < len(videos):
+            video = videos[i]
+            job_id = video.get("job_id", "")
+            name = escape(str(video.get("name") or f"{job_id}.mp4"))
+            completed_at = escape(str(video.get("completed_at", "")))
+            
+            local_path = str(GENERATED_VIDEO_DIR / f"{job_id}.mp4")
+            
+            html_label = f"""
+                <div class='em-kb-label'><strong>{name}</strong></div>
+                <div style='color: var(--em-muted); font-size: 12px;'>Completed: {completed_at}</div>
+            """
+            
+            updates.append(gr.update(visible=True))
+            updates.append(gr.update(value=html_label))
+            updates.append(gr.update(value=local_path))
         else:
-            updates += [gr.update(visible=False), gr.update(value=""), ""]
-    updates.append(gr.update(visible=(len(docs) == 0)))
+            updates.append(gr.update(visible=False))
+            updates.append(gr.update(value=""))
+            updates.append(gr.update(value=None))
+
     return updates
  
- 
-def handle_upload(files, kb_state):
-    if not RAG_AVAILABLE:
-        return refresh_kb_slots(kb_state) + [gr.update(value=f"⚠️ {_RAG_IMPORT_ERROR_MSG}")]
-    if not files:
-        return refresh_kb_slots(kb_state) + [gr.update()]
 
-    if _retriever is None:
-        return refresh_kb_slots(kb_state) + [gr.update(value="⚠️ Retriever unavailable")]
- 
-    kb_id = _resolve_kb_id(kb_state)
-    ok, errors = 0, []
-    for f in files:
-        path = f.name if hasattr(f, "name") else str(f)
-        try:
-            result = ingest_file(path, kb_id=kb_id)
-            ok += 1 if result["status"] in ("indexed", "duplicate") else 0
-        except Exception as e:  # noqa: BLE001 - surface per-file failures, keep processing the rest
-            errors.append(f"{Path(path).name}: {e}")
- 
-    _retriever.invalidate(kb_id)  # force next query to re-read the fresh index
- 
-    status = f"✓ Indexed {ok} file(s)"
-    if errors:
-        status += " · " + "; ".join(errors)
-    return refresh_kb_slots(kb_state) + [gr.update(value=status)]
- 
- 
-def handle_slot_delete(doc_id, kb_state):
-    if RAG_AVAILABLE and doc_id:
-        if _retriever is None:
-            return refresh_kb_slots(kb_state)
-        kb_id = _resolve_kb_id(kb_state)
-        delete_document(doc_id, kb_id=kb_id)
-        _retriever.invalidate(kb_id)
-    return refresh_kb_slots(kb_state)
- 
- 
-def handle_test_query(query_text, kb_state):
-    if not query_text or not query_text.strip():
-        return "Type a question above to preview retrieval."
-    if not RAG_AVAILABLE:
-        return f"⚠️ {_RAG_IMPORT_ERROR_MSG}"
-
-    if _retriever is None:
-        return "⚠️ Retriever unavailable"
- 
-    kb_id = _resolve_kb_id(kb_state)
-    try:
-        hits = _retriever.query(query_text, top_k=5, kb_id=kb_id)
-    except Exception as e:  # noqa: BLE001 - show retrieval failures in-panel, don't crash the UI
-        return f"⚠️ Retrieval failed: {e}"
- 
-    if not hits:
-        return "_No results — upload a document above first, or try a different question._"
- 
-    lines = [f"**{h['score']:.2f}** · `{h['source']} p.{h['page']}`\n> {h['text']}" for h in hits]
-    return "\n\n---\n\n".join(lines)
- 
- 
-def handle_reindex(kb_state):
-    if not RAG_AVAILABLE:
-        return refresh_kb_slots(kb_state) + [gr.update(value=f"⚠️ {_RAG_IMPORT_ERROR_MSG}")]
-    if _retriever is None:
-        return refresh_kb_slots(kb_state) + [gr.update(value="⚠️ Retriever unavailable")]
-    kb_id = _resolve_kb_id(kb_state)
-    result = reindex_all(kb_id=kb_id)
-    _retriever.invalidate(kb_id)
-    return refresh_kb_slots(kb_state) + [gr.update(value=f"✓ Reindexed {result['chunk_count']} chunks")]
  
  
 # ============================================================================
@@ -669,7 +549,6 @@ def handle_reindex(kb_state):
 def build_app() -> gr.Blocks:
     with gr.Blocks(theme=THEME, css=CUSTOM_CSS, head=HEAD_HTML, title="EduManim") as demo:
  
-        kb_state = gr.State(value=None)
         voice_state = gr.State(value="Narrator")
         quality_state = gr.State(value="720p")
  
@@ -723,54 +602,23 @@ def build_app() -> gr.Blocks:
                                 elem_classes=["em-terminal"],
                             )
  
-            # ========================= KNOWLEDGE BASE ========================
-            with gr.Tab("📚 Knowledge Base"):
-                gr.Markdown("Upload PDFs, Markdown, or text files. EduManim retrieves relevant passages before answering.")
-                with gr.Row():
-                    uploader = gr.File(label="Drop files here", file_count="multiple", scale=2)
-                    with gr.Column(scale=1):
-                        upload_status = gr.Markdown("")
-                        reindex_btn = gr.Button("Reindex all", variant="secondary")
- 
-                gr.Markdown("**Indexed documents**")
- 
-                kb_empty_state = gr.HTML(
-                    "<div class='em-empty'>No documents yet — upload a file above to get started.</div>",
-                    visible=True,
-                )
- 
-                kb_slot_rows, kb_slot_labels, kb_slot_ids, kb_slot_delete_btns = [], [], [], []
-                for _ in range(MAX_KB_SLOTS):
-                    with gr.Row(visible=False, elem_classes=["em-kb-row"]) as slot_row:
-                        slot_label = gr.HTML("")
-                        slot_id = gr.State("")
-                        slot_delete = gr.Button("Delete", size="sm", variant="secondary", scale=0, min_width=90)
-                    kb_slot_rows.append(slot_row)
-                    kb_slot_labels.append(slot_label)
-                    kb_slot_ids.append(slot_id)
-                    kb_slot_delete_btns.append(slot_delete)
- 
-                kb_slot_outputs = []
-                for row, label, sid in zip(kb_slot_rows, kb_slot_labels, kb_slot_ids):
-                    kb_slot_outputs += [row, label, sid]
-                kb_slot_outputs.append(kb_empty_state)
- 
-                gr.Markdown("**Test retrieval** — preview what the agent would see, before asking a full question.")
-                with gr.Row():
-                    test_query_box = gr.Textbox(placeholder="e.g. What is bonded labour?", show_label=False, scale=3)
-                    test_query_btn = gr.Button("Preview", scale=1)
-                test_query_out = gr.Markdown("")
- 
-                uploader.upload(handle_upload, [uploader, kb_state], kb_slot_outputs + [upload_status])
-                for sid, btn in zip(kb_slot_ids, kb_slot_delete_btns):
-                    btn.click(handle_slot_delete, [sid, kb_state], kb_slot_outputs)
-                test_query_btn.click(handle_test_query, [test_query_box, kb_state], [test_query_out])
-                reindex_btn.click(handle_reindex, [kb_state], kb_slot_outputs + [upload_status])
- 
             # ============================ MY VIDEOS ==========================
-            with gr.Tab("🎬 My Videos"):
-                videos_html = gr.HTML(refresh_video_gallery())
- 
+            with gr.Tab("🎬 My Videos") as my_videos_tab:
+                videos_empty = gr.HTML("<div class='em-empty'>Click this tab to load your videos.</div>")
+                
+                video_rows = []
+                video_labels = []
+                video_dl_btns = []
+
+                for i in range(MAX_VIDEO_SLOTS):
+                    with gr.Row(visible=False, elem_classes=["em-kb-row"]) as row:
+                        lbl = gr.HTML()
+                        btn = gr.DownloadButton("⬇ Download", size="sm")
+                        
+                        video_rows.append(row)
+                        video_labels.append(lbl)
+                        video_dl_btns.append(btn)
+
             # ============================ SETTINGS ===========================
             with gr.Tab("⚙️ Settings"):
                 with gr.Row():
@@ -783,33 +631,31 @@ def build_app() -> gr.Blocks:
                         )
                         gr.Markdown("**Video quality**")
                         quality_radio = gr.Radio(["720p", "1080p"], value="720p", show_label=False)
-                    with gr.Column():
-                        gr.Markdown("**Agent verbosity**")
-                        gr.Radio(["Quiet", "Normal", "Show agent thoughts"], value="Normal", show_label=False)
-                        gr.Markdown("**Theme**")
-                        gr.Radio(["Dark (default)", "Light"], value="Dark (default)", show_label=False)
  
                 voice_radio.change(lambda v: v, [voice_radio], [voice_state])
                 quality_radio.change(lambda v: v, [quality_radio], [quality_state])
  
+            video_gallery_outputs = [videos_empty]
+            for r, l, b in zip(video_rows, video_labels, video_dl_btns):
+                video_gallery_outputs.extend([r, l, b])
+
             send_btn.click(
                 handle_send,
-                [msg_box, chatbot, kb_state, voice_state, quality_state],
+                [msg_box, chatbot, voice_state, quality_state],
                 [chatbot, progress_md, thoughts_box, video_player, transcript_html],
-            ).then(refresh_video_gallery, None, [videos_html]).then(lambda: "", None, msg_box)
+            ).then(refresh_video_gallery, None, video_gallery_outputs).then(lambda: "", None, msg_box)
 
             msg_box.submit(
                 handle_send,
-                [msg_box, chatbot, kb_state, voice_state, quality_state],
+                [msg_box, chatbot, voice_state, quality_state],
                 [chatbot, progress_md, thoughts_box, video_player, transcript_html],
-            ).then(refresh_video_gallery, None, [videos_html]).then(lambda: "", None, msg_box)
-
-            demo.load(refresh_kb_slots, [kb_state], kb_slot_outputs)
-            demo.load(refresh_video_gallery, None, [videos_html])
- 
+            ).then(refresh_video_gallery, None, video_gallery_outputs).then(lambda: "", None, msg_box)
+            
+            my_videos_tab.select(refresh_video_gallery, None, video_gallery_outputs)
+    
     return demo
  
  
 if __name__ == "__main__":
     app = build_app()
-    app.queue().launch(server_name="0.0.0.0", server_port=7860)
+    app.queue().launch(server_name="0.0.0.0", server_port=7860) 
