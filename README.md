@@ -155,7 +155,7 @@ The frontend connects to the backend API via `EDUMANIM_API_URL` (defaults to `ht
 
 ![EduManim UI](README_Data/EduManim.png)
 
-![Demo Video](https://github.com/user-attachments/assets/ed298a1f-c45e-4648-b0a2-60f191f674ba)
+https://github.com/user-attachments/assets/ed298a1f-c45e-4648-b0a2-60f191f674ba
 
 ---
 
