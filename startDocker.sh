@@ -1,3 +1,5 @@
+#!/bin/bash
+
 cleanup() {
     echo "Stopping services..."
     kill $API_PID $FRONTEND_PID 2>/dev/null
