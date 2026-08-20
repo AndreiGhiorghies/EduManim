@@ -87,8 +87,6 @@ API_KEY=your_fireworks_api_key_here
 BASE_URL=https://api.fireworks.ai/inference/v1/
 ```
 
-> **Important:** Never commit your `.env` file to Git. It is already listed in `.gitignore`.
-
 ### When `ROUTE=LOCAL`
 
 The local route uses **Qwen2.5-32B-Instruct** quantized to Q8 (GGUF format), loaded via `llama-cpp-python` with full GPU offload. Running `init.py` will automatically download the model from HuggingFace into `./LLM/Models/`.
@@ -157,7 +155,7 @@ The frontend connects to the backend API via `EDUMANIM_API_URL` (defaults to `ht
 
 ![EduManim UI](README_Data/EduManim.png)
 
-![Demo Video](README_Data/video_example.mp4)
+![Demo Video](https://github.com/user-attachments/assets/ed298a1f-c45e-4648-b0a2-60f191f674ba)
 
 ---
 
