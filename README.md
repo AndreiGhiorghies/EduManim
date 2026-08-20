@@ -8,7 +8,7 @@ EduManim is an AI-powered pipeline that turns a plain-text question into a fully
 
 ## Hackathon
 
-This project was built for the **[AMD AI DevMaster Hackathon](https://luma.com/amd-4dhir)** — **Track 1: Development of Multimodal Content Creation Tools**.
+This project was built for the **[AMD AI DevMaster Hackathon](https://luma.com/amd-4dhi)** — **Track 1: Development of Multimodal Content Creation Tools**.
 
 > Develop lightweight and high-performance AI multimodal content creation tools based on the computing power of **AMD Radeon GPU** and the **ROCm open-source software stack**.
 
