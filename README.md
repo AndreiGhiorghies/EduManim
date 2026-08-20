@@ -34,7 +34,7 @@ User Query
     ▼
 ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
 │ Scriptwriter│ →  │     TTS     │ →  │ Manim Coder │ →  │   FFmpeg    │
-│  (LLM)      │    │  (Coqui)   │    │   (LLM)     │    │  Assembler  │
+│  (LLM)      │    │  (Coqui)    │    │   (LLM)     │    │  Assembler  │
 └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
                                                                │
                                                                ▼
